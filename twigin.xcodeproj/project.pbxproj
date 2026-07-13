@@ -6,6 +6,23 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AAA1B6653004157900663FB1 /* SQLite in Frameworks */ = {isa = PBXBuildFile; productRef = AAA1B6643004157900663FB1 /* SQLite */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		AA918FAA30042D2500DFE9DF /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		AAA1B64530040D1600663FB1 /* twigin.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = twigin.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,16 +40,25 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AAA1B6653004157900663FB1 /* SQLite in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		AA918FAB30042D5D00DFE9DF /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		AAA1B63C30040D1600663FB1 = {
 			isa = PBXGroup;
 			children = (
 				AAA1B64730040D1600663FB1 /* twigin */,
+				AA918FAB30042D5D00DFE9DF /* Frameworks */,
 				AAA1B64630040D1600663FB1 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -55,6 +81,7 @@
 				AAA1B64130040D1600663FB1 /* Sources */,
 				AAA1B64230040D1600663FB1 /* Frameworks */,
 				AAA1B64330040D1600663FB1 /* Resources */,
+				AA918FAA30042D2500DFE9DF /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
@@ -65,6 +92,7 @@
 			);
 			name = twigin;
 			packageProductDependencies = (
+				AAA1B6643004157900663FB1 /* SQLite */,
 			);
 			productName = twigin;
 			productReference = AAA1B64530040D1600663FB1 /* twigin.app */;
@@ -94,6 +122,9 @@
 			);
 			mainGroup = AAA1B63C30040D1600663FB1;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AAA1B6633004157900663FB1 /* XCRemoteSwiftPackageReference "SQLite.swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AAA1B64630040D1600663FB1 /* Products */;
 			projectDirPath = "";
@@ -325,6 +356,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AAA1B6633004157900663FB1 /* XCRemoteSwiftPackageReference "SQLite.swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stephencelis/SQLite.swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.16.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AAA1B6643004157900663FB1 /* SQLite */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AAA1B6633004157900663FB1 /* XCRemoteSwiftPackageReference "SQLite.swift" */;
+			productName = SQLite;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = AAA1B63D30040D1600663FB1 /* Project object */;
 }
