@@ -9,9 +9,17 @@ import SwiftUI
 
 @main
 struct twiginApp: App {
+    @StateObject private var themeManager = ThemeManager()
+    
     var body: some Scene {
         WindowGroup {
             MainSplitView()
+                .environmentObject(themeManager)
+        }
+        
+        Settings {
+            SettingsView()
+                .environmentObject(themeManager)
         }
     }
 }

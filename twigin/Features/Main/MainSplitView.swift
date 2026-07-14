@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct MainSplitView: View {
+    @EnvironmentObject private var themeManager: ThemeManager
     @StateObject private var folderViewModel = FolderListViewModel()
     @StateObject private var noteViewModel = NoteListViewModel()
     
@@ -29,9 +30,6 @@ struct MainSplitView: View {
                             }
                             Button("Delete Folder", role: .destructive) {
                                 folderViewModel.deleteFolder(id: folder.id)
-                                // If the deleted folder was currently selected,
-                                // the selectedFolderId state will update to nil,
-                                // and the onChange will clear the notes automatically.
                             }
                             Divider()
                         }
@@ -76,11 +74,15 @@ struct MainSplitView: View {
                 }
             }
             .navigationTitle("Folders")
+            .toolbarBackground(.hidden, for: .windowToolbar)
+            .scrollContentBackground(.hidden)
+            .background(themeManager.currentTheme.bgFolderList)
         } content: {
             // Middle Pane: Notes
             List(selection: $selectedNoteId) {
                 ForEach(noteViewModel.notes) { note in
                     Text(note.title)
+                        .foregroundColor(themeManager.currentTheme.textMain)
                         .tag(note.id)
                         .contextMenu {
                             Button("New Note") {
@@ -101,6 +103,8 @@ struct MainSplitView: View {
                 }
             }
             .navigationTitle("Notes")
+            .scrollContentBackground(.hidden)
+            .background(themeManager.currentTheme.bgNoteList)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -108,7 +112,7 @@ struct MainSplitView: View {
                             noteViewModel.createNote(in: folderId)
                         }
                     } label: {
-                        Label("New Note", systemImage: "square.and.pencil")
+                        Label("New Note", systemImage: "plus")
                     }
                     .disabled(selectedFolderId == nil)
                 }
@@ -117,8 +121,12 @@ struct MainSplitView: View {
             // Right Pane: Detail
             if let selectedNoteId = selectedNoteId {
                 NoteEditorView(noteId: selectedNoteId, viewModel: noteViewModel)
+                    .background(themeManager.currentTheme.bgNoteEditor)
             } else {
                 Text("No note selected")
+                    .foregroundColor(themeManager.currentTheme.textMuted)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(themeManager.currentTheme.bgNoteEditor)
             }
         }
         .onAppear {
@@ -142,11 +150,13 @@ struct FolderRowView: View {
     
     @State private var editedTitle: String = ""
     @FocusState private var isFocused: Bool
+    @EnvironmentObject private var themeManager: ThemeManager
     
     var body: some View {
         if isEditing {
             TextField("Folder Name", text: $editedTitle)
                 .focused($isFocused)
+                .foregroundColor(themeManager.currentTheme.textMain)
                 .onSubmit {
                     onCommitRename(editedTitle)
                 }
@@ -161,10 +171,12 @@ struct FolderRowView: View {
                 }
         } else {
             Text(folder.folderTitle)
+                .foregroundColor(themeManager.currentTheme.textMain)
         }
     }
 }
 
 #Preview {
     MainSplitView()
+        .environmentObject(ThemeManager())
 }

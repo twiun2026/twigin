@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AA8D0DF33005C7E90048C2EA /* CLAUDE.md in Sources */ = {isa = PBXBuildFile; fileRef = AA8D0DF23005C7D60048C2EA /* CLAUDE.md */; };
 		AAA1B6653004157900663FB1 /* SQLite in Frameworks */ = {isa = PBXBuildFile; productRef = AAA1B6643004157900663FB1 /* SQLite */; };
 /* End PBXBuildFile section */
 
@@ -24,6 +25,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		AA8D0DF23005C7D60048C2EA /* CLAUDE.md */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLAUDE.md; sourceTree = "<group>"; };
 		AAA1B64530040D1600663FB1 /* twigin.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = twigin.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -57,6 +59,7 @@
 		AAA1B63C30040D1600663FB1 = {
 			isa = PBXGroup;
 			children = (
+				AA8D0DF23005C7D60048C2EA /* CLAUDE.md */,
 				AAA1B64730040D1600663FB1 /* twigin */,
 				AA918FAB30042D5D00DFE9DF /* Frameworks */,
 				AAA1B64630040D1600663FB1 /* Products */,
@@ -150,6 +153,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA8D0DF33005C7E90048C2EA /* CLAUDE.md in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
