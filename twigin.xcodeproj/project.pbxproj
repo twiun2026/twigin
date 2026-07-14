@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AA8D0DF33005C7E90048C2EA /* CLAUDE.md in Sources */ = {isa = PBXBuildFile; fileRef = AA8D0DF23005C7D60048C2EA /* CLAUDE.md */; };
+		AA8D0DF63005D4550048C2EA /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = AA8D0DF53005D4550048C2EA /* Markdown */; };
 		AAA1B6653004157900663FB1 /* SQLite in Frameworks */ = {isa = PBXBuildFile; productRef = AAA1B6643004157900663FB1 /* SQLite */; };
 /* End PBXBuildFile section */
 
@@ -43,6 +43,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AAA1B6653004157900663FB1 /* SQLite in Frameworks */,
+				AA8D0DF63005D4550048C2EA /* Markdown in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -96,6 +97,7 @@
 			name = twigin;
 			packageProductDependencies = (
 				AAA1B6643004157900663FB1 /* SQLite */,
+				AA8D0DF53005D4550048C2EA /* Markdown */,
 			);
 			productName = twigin;
 			productReference = AAA1B64530040D1600663FB1 /* twigin.app */;
@@ -127,6 +129,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				AAA1B6633004157900663FB1 /* XCRemoteSwiftPackageReference "SQLite.swift" */,
+				AA8D0DF43005D4550048C2EA /* XCRemoteSwiftPackageReference "swift-markdown" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AAA1B64630040D1600663FB1 /* Products */;
@@ -153,7 +156,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AA8D0DF33005C7E90048C2EA /* CLAUDE.md in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -362,6 +364,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		AA8D0DF43005D4550048C2EA /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/swiftlang/swift-markdown";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.8.0;
+			};
+		};
 		AAA1B6633004157900663FB1 /* XCRemoteSwiftPackageReference "SQLite.swift" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/stephencelis/SQLite.swift.git";
@@ -373,6 +383,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		AA8D0DF53005D4550048C2EA /* Markdown */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA8D0DF43005D4550048C2EA /* XCRemoteSwiftPackageReference "swift-markdown" */;
+			productName = Markdown;
+		};
 		AAA1B6643004157900663FB1 /* SQLite */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = AAA1B6633004157900663FB1 /* XCRemoteSwiftPackageReference "SQLite.swift" */;
