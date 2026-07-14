@@ -3,15 +3,19 @@ import SwiftUI
 struct MarkdownEditorView: View {
     @Binding var text: String
     var theme: AppTheme
+    var fontName: String = ""
+    var lineSpacing: CGFloat = 0
 
     var body: some View {
-        MarkdownTextView(text: $text, theme: theme)
+        MarkdownTextView(text: $text, theme: theme, fontName: fontName, lineSpacing: lineSpacing)
     }
 }
 
 struct MarkdownTextView: NSViewRepresentable {
     @Binding var text: String
     var theme: AppTheme
+    var fontName: String = ""
+    var lineSpacing: CGFloat = 0
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -27,7 +31,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
         textView.backgroundColor = NSColor(theme.bgNoteEditor)
         textView.insertionPointColor = NSColor(theme.textMain)
-        textView.font = NSFont.systemFont(ofSize: 14, weight: .regular)
+        textView.font = resolvedFont()
 
         // bind() and delegate must be set BEFORE string assignment so willProcessEditing
         // fires with a valid textView reference.
@@ -40,6 +44,8 @@ struct MarkdownTextView: NSViewRepresentable {
         // an explicit full render to apply initial markdown styling.
         context.coordinator.pendingEditedRange = nil
         context.coordinator.lastRenderedTheme = theme
+        context.coordinator.lastRenderedFontName = fontName
+        context.coordinator.lastRenderedLineSpacing = lineSpacing
         context.coordinator.refreshFull()
 
         let scrollView = NSScrollView()
@@ -59,6 +65,9 @@ struct MarkdownTextView: NSViewRepresentable {
         guard let textView = nsView.documentView as? MarkdownNativeTextView else { return }
 
         textView.insertionPointColor = NSColor(theme.textMain)
+        let newFont = resolvedFont()
+        if textView.font != newFont { textView.font = newFont }
+
         let bgColor = NSColor(theme.bgNoteEditor)
         if textView.backgroundColor != bgColor {
             textView.backgroundColor = bgColor
@@ -72,13 +81,24 @@ struct MarkdownTextView: NSViewRepresentable {
             textView.string = text
             context.coordinator.pendingEditedRange = nil
             context.coordinator.lastRenderedTheme = theme
+            context.coordinator.lastRenderedFontName = fontName
+            context.coordinator.lastRenderedLineSpacing = lineSpacing
             context.coordinator.refreshFull()
-        } else if context.coordinator.lastRenderedTheme != theme {
-            // Theme changed, text is same — only case that needs an explicit full re-render
+        } else if context.coordinator.lastRenderedTheme != theme
+               || context.coordinator.lastRenderedFontName != fontName
+               || context.coordinator.lastRenderedLineSpacing != lineSpacing {
             context.coordinator.refreshFull()
         }
         // text == textView.string && theme unchanged → user typed a character.
         // willProcessEditing already applied attributes atomically. Nothing to do.
+    }
+
+    private func resolvedFont() -> NSFont {
+        let size: CGFloat = 14
+        if !fontName.isEmpty, let font = NSFont(name: fontName, size: size) {
+            return font
+        }
+        return NSFont.systemFont(ofSize: size, weight: .regular)
     }
 
     // MARK: - Coordinator
@@ -88,6 +108,8 @@ struct MarkdownTextView: NSViewRepresentable {
         weak var textView: MarkdownNativeTextView?
         /// Tracks the theme used in the last full render; drives theme-change detection in updateNSView.
         var lastRenderedTheme: AppTheme? = nil
+        var lastRenderedFontName: String = ""
+        var lastRenderedLineSpacing: CGFloat = 0
         /// Set by willProcessEditing; consumed by textDidChange to render the affected blocks.
         var pendingEditedRange: NSRange? = nil
 
@@ -131,6 +153,8 @@ struct MarkdownTextView: NSViewRepresentable {
             // re-layout for the common case (typing in a plain paragraph).
             guard let editedRange = pendingEditedRange else { return }
             pendingEditedRange = nil
+            renderer.bodyFontName = parent.fontName
+            renderer.lineSpacingMultiplier = parent.lineSpacing
             renderer.render(
                 .init(
                     textView: textView,
@@ -153,6 +177,8 @@ struct MarkdownTextView: NSViewRepresentable {
 
         func refreshFull() {
             guard let textView else { return }
+            renderer.bodyFontName = parent.fontName
+            renderer.lineSpacingMultiplier = parent.lineSpacing
             document = renderer.parse(source: textView.string)
             renderer.render(
                 .init(
@@ -169,6 +195,8 @@ struct MarkdownTextView: NSViewRepresentable {
                 )
             )
             lastRenderedTheme = parent.theme
+            lastRenderedFontName = parent.fontName
+            lastRenderedLineSpacing = parent.lineSpacing
         }
 
         // MARK: Checklist toggle

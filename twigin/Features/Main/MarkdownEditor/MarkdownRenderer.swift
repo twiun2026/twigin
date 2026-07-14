@@ -18,10 +18,26 @@ final class MarkdownRenderer {
     /// incremental renders so NSTextLayoutManager can skip ViewProvider re-instantiation.
     private var checkboxCache: [Int: CheckboxAttachment] = [:]
 
+    var bodyFontName: String = ""
+    var lineSpacingMultiplier: CGFloat = 0
+
+    private func bodyFont(size: CGFloat = 14) -> NSFont {
+        if !bodyFontName.isEmpty, let font = NSFont(name: bodyFontName, size: size) { return font }
+        return NSFont.systemFont(ofSize: size, weight: .regular)
+    }
+
+    private func applySpacing(to paragraph: NSMutableParagraphStyle, default defaultSpacing: CGFloat) {
+        if lineSpacingMultiplier > 0 {
+            paragraph.lineHeightMultiple = lineSpacingMultiplier
+        } else {
+            paragraph.lineSpacing = defaultSpacing
+        }
+    }
+
     private func baseAttributes(theme: AppTheme) -> [NSAttributedString.Key: Any] {
         [
             .foregroundColor: NSColor(theme.textMain),
-            .font: NSFont.systemFont(ofSize: 14, weight: .regular)
+            .font: bodyFont()
         ]
     }
 
@@ -191,7 +207,7 @@ final class MarkdownRenderer {
 
         attributed.addAttributes([
             .foregroundColor: NSColor(theme.textCitation),
-            .font: NSFont.systemFont(ofSize: 14, weight: .regular)
+            .font: bodyFont()
         ], range: content)
 
         let paragraph = NSMutableParagraphStyle()
@@ -203,7 +219,7 @@ final class MarkdownRenderer {
         textBlock.setContentWidth(100, type: .percentageValueType)
         paragraph.textBlocks = [textBlock]
         paragraph.paragraphSpacing = 4
-        paragraph.lineSpacing = 2
+        applySpacing(to: paragraph, default: 2)
         attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
 
         applyInline(inlines, to: attributed, theme: theme)
@@ -233,7 +249,7 @@ final class MarkdownRenderer {
 
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 6
-        paragraph.lineSpacing = 2
+        applySpacing(to: paragraph, default: 2)
         attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
     }
 
@@ -245,9 +261,11 @@ final class MarkdownRenderer {
     ) {
         guard let line = safeRange(lineRange, in: attributed) else { return }
 
+        attributed.addAttribute(.font, value: bodyFont(), range: line)
+
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 4
-        paragraph.lineSpacing = 2
+        applySpacing(to: paragraph, default: 2)
         attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
 
         applyInline(inlines, to: attributed, theme: theme)
@@ -318,7 +336,7 @@ final class MarkdownRenderer {
         let paragraph = NSMutableParagraphStyle()
         paragraph.headIndent = 24
         paragraph.paragraphSpacing = 3
-        paragraph.lineSpacing = 1
+        applySpacing(to: paragraph, default: 1)
         attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
 
         applyInline(inlines, to: attributed, theme: theme)
@@ -365,14 +383,14 @@ final class MarkdownRenderer {
 
         attributed.addAttributes([
             .foregroundColor: NSColor(theme.textMain),
-            .font: NSFont.systemFont(ofSize: 14, weight: .regular)
+            .font: bodyFont()
         ], range: content)
 
         let paragraph = NSMutableParagraphStyle()
         paragraph.firstLineHeadIndent = 0
         paragraph.headIndent = indent
         paragraph.paragraphSpacing = 3
-        paragraph.lineSpacing = 1
+        applySpacing(to: paragraph, default: 1)
         attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
 
         applyInline(inlines, to: attributed, theme: theme)
