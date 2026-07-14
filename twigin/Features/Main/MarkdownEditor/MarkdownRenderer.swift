@@ -14,6 +14,10 @@ struct MarkdownRenderContext {
 final class MarkdownRenderer {
     private let parser = MarkdownParser()
 
+    /// Keyed by lineRange.location — reuses the same NSTextAttachment object across
+    /// incremental renders so NSTextLayoutManager can skip ViewProvider re-instantiation.
+    private var checkboxCache: [Int: CheckboxAttachment] = [:]
+
     private func baseAttributes(theme: AppTheme) -> [NSAttributedString.Key: Any] {
         [
             .foregroundColor: NSColor(theme.textMain),
@@ -36,88 +40,135 @@ final class MarkdownRenderer {
         parser.parse(source)
     }
 
+    // MARK: - Shared Helpers (used by both render paths)
+
+    private func computeAffected(_ blocks: [MarkdownBlock], editedRange: NSRange?) -> [MarkdownBlock] {
+        guard let edited = editedRange else { return blocks }
+        return blocks.filter { lineRange(of: $0).overlaps(edited) }
+    }
+
+    private func computeApplyRange(_ affected: [MarkdownBlock], storageLen: Int) -> NSRange? {
+        let union = affected.map { lineRange(of: $0) }
+            .reduce(nil as NSRange?) { acc, r in acc.map { NSUnionRange($0, r) } ?? r }
+        guard let u = union else { return nil }
+        let hi = min(NSMaxRange(u), storageLen)
+        guard hi > u.location else { return nil }
+        return NSRange(location: u.location, length: hi - u.location)
+    }
+
+    private func applyRaw(
+        affected: [MarkdownBlock],
+        applyRange: NSRange,
+        to storage: NSMutableAttributedString,
+        theme: AppTheme,
+        context: MarkdownRenderContext
+    ) {
+        storage.setAttributes(baseAttributes(theme: theme), range: applyRange)
+        for block in affected {
+            applyBlock(block, to: storage, theme: theme, context: context)
+        }
+    }
+
+    // MARK: - render(): for full/theme/note-switch renders (outside processEditing cycle)
+
     func render(_ context: MarkdownRenderContext) {
         guard let textStorage = context.textView.textStorage else { return }
+        let storageLen = textStorage.length
+        guard storageLen > 0 else { return }
 
-        let source = context.textView.string
-        let fullRange = NSRange(location: 0, length: (source as NSString).length)
-        let selected = context.textView.selectedRanges
-
-        let mutable = NSMutableAttributedString(string: source)
-        mutable.setAttributes(baseAttributes(theme: context.theme), range: fullRange)
-
-        for block in context.document.blocks {
-            applyBlock(block, to: mutable, theme: context.theme, context: context)
+        let newBlocks = context.document.blocks
+        if context.editedRange == nil {
+            let liveKeys = Set(newBlocks.compactMap { checkboxKey($0) })
+            checkboxCache = checkboxCache.filter { liveKeys.contains($0.key) }
         }
 
-        textStorage.beginEditing()
-        textStorage.setAttributedString(mutable)
-        textStorage.endEditing()
+        let affected = computeAffected(newBlocks, editedRange: context.editedRange)
+        guard !affected.isEmpty,
+              let applyRange = computeApplyRange(affected, storageLen: storageLen) else { return }
 
-        context.textView.selectedRanges = selected
+        textStorage.beginEditing()
+        applyRaw(affected: affected, applyRange: applyRange, to: textStorage, theme: context.theme, context: context)
+        textStorage.endEditing()
     }
+
+    // MARK: - renderInProcessingCycle(): called from NSTextStorageDelegate.willProcessEditing
+    //
+    // Runs INSIDE the textStorage.processEditing() cycle — NO beginEditing/endEditing.
+    // Attribute changes are merged with the text change into a single layout pass,
+    // eliminating the two-draw-cycle jitter caused by calling render() in textDidChange.
+
+    func renderInProcessingCycle(
+        textStorage: NSTextStorage,
+        document: MarkdownDocument,
+        editedRange: NSRange,
+        theme: AppTheme,
+        textView: MarkdownNativeTextView,
+        onToggleChecklist: @escaping (NSRange, Bool) -> Void,
+        onTapImage: @escaping (String) -> Void
+    ) {
+        let storageLen = textStorage.length
+        guard storageLen > 0 else { return }
+
+        let affected = computeAffected(document.blocks, editedRange: editedRange)
+        guard !affected.isEmpty,
+              let applyRange = computeApplyRange(affected, storageLen: storageLen) else { return }
+
+        let ctx = MarkdownRenderContext(
+            textView: textView,
+            theme: theme,
+            document: document,
+            editedRange: editedRange,
+            onToggleChecklist: onToggleChecklist,
+            onTapImage: onTapImage
+        )
+        // Attribute changes here are part of the current processEditing cycle
+        applyRaw(affected: affected, applyRange: applyRange, to: textStorage, theme: theme, context: ctx)
+    }
+
+    // MARK: - Block Range Helpers
+
+    private func lineRange(of block: MarkdownBlock) -> NSRange {
+        switch block {
+        case let .heading(_, _, _, r): return r
+        case let .paragraph(r, _): return r
+        case let .checklist(_, _, _, r, _): return r
+        case let .image(_, _, r): return r
+        case let .bulletList(_, _, r, _): return r
+        case let .orderedList(_, _, _, r, _): return r
+        case let .blockquote(_, _, r, _): return r
+        }
+    }
+
+    private func checkboxKey(_ block: MarkdownBlock) -> Int? {
+        guard case let .checklist(_, _, _, r, _) = block else { return nil }
+        return r.location
+    }
+
+    // MARK: - Block Dispatch
+    // NSTextStorage IS NSMutableAttributedString — no parameter type changes required.
 
     private func applyBlock(_ block: MarkdownBlock, to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
         switch block {
         case let .heading(level, markerRange, contentRange, lineRange):
-            applyHeading(
-                level: level,
-                markerRange: markerRange,
-                contentRange: contentRange,
-                lineRange: lineRange,
-                to: attributed,
-                theme: theme
-            )
+            applyHeading(level: level, markerRange: markerRange, contentRange: contentRange, lineRange: lineRange, to: attributed, theme: theme)
 
         case let .paragraph(lineRange, inlines):
             applyParagraph(lineRange: lineRange, inlines: inlines, to: attributed, theme: theme)
 
         case let .checklist(marker, markerRange, contentRange, lineRange, inlines):
-            applyChecklist(
-                marker: marker,
-                markerRange: markerRange,
-                contentRange: contentRange,
-                lineRange: lineRange,
-                inlines: inlines,
-                to: attributed,
-                theme: theme,
-                context: context
-            )
+            applyChecklist(marker: marker, markerRange: markerRange, contentRange: contentRange, lineRange: lineRange, inlines: inlines, to: attributed, theme: theme, context: context)
 
         case let .image(_, path, lineRange):
             applyImageLine(path: path, lineRange: lineRange, to: attributed, theme: theme)
-            
+
         case let .bulletList(markerRange, contentRange, lineRange, inlines):
-            applyListBlock(
-                markerRange: markerRange,
-                contentRange: contentRange,
-                lineRange: lineRange,
-                inlines: inlines,
-                to: attributed,
-                theme: theme,
-                indent: 20 // 无序列表缩进距离
-            )
+            applyListBlock(markerRange: markerRange, contentRange: contentRange, lineRange: lineRange, inlines: inlines, to: attributed, theme: theme, indent: 20)
 
         case let .orderedList(_, markerRange, contentRange, lineRange, inlines):
-            applyListBlock(
-                markerRange: markerRange,
-                contentRange: contentRange,
-                lineRange: lineRange,
-                inlines: inlines,
-                to: attributed,
-                theme: theme,
-                indent: 24 // 有序列表由于含有数字，缩进略微设宽一些
-            )
-            
+            applyListBlock(markerRange: markerRange, contentRange: contentRange, lineRange: lineRange, inlines: inlines, to: attributed, theme: theme, indent: 24)
+
         case let .blockquote(markerRange, contentRange, lineRange, inlines):
-            applyBlockquote(
-                markerRange: markerRange,
-                contentRange: contentRange,
-                lineRange: lineRange,
-                inlines: inlines,
-                to: attributed,
-                theme: theme
-            )
+            applyBlockquote(markerRange: markerRange, contentRange: contentRange, lineRange: lineRange, inlines: inlines, to: attributed, theme: theme)
         }
     }
 
@@ -144,21 +195,15 @@ final class MarkdownRenderer {
         ], range: content)
 
         let paragraph = NSMutableParagraphStyle()
-        
         let textBlock = NSTextBlock()
         textBlock.backgroundColor = NSColor(theme.bgCitation)
-        // 8 points inner padding on all edges
         textBlock.setWidth(8, type: .absoluteValueType, for: .padding)
-        // Indent the block itself from the paragraph edges
         textBlock.setWidth(16, type: .absoluteValueType, for: .margin, edge: .minX)
         textBlock.setWidth(16, type: .absoluteValueType, for: .margin, edge: .maxX)
-        // Set width to 100% so it doesn't collapse
         textBlock.setContentWidth(100, type: .percentageValueType)
-        
         paragraph.textBlocks = [textBlock]
         paragraph.paragraphSpacing = 4
         paragraph.lineSpacing = 2
-        
         attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
 
         applyInline(inlines, to: attributed, theme: theme)
@@ -176,7 +221,6 @@ final class MarkdownRenderer {
               let content = safeRange(contentRange, in: attributed),
               let line = safeRange(lineRange, in: attributed) else { return }
 
-        let size = headingSize(for: level)
         attributed.addAttributes([
             .foregroundColor: NSColor(theme.textMuted),
             .font: NSFont.systemFont(ofSize: 14, weight: .regular)
@@ -184,7 +228,7 @@ final class MarkdownRenderer {
 
         attributed.addAttributes([
             .foregroundColor: NSColor(theme.textHeader),
-            .font: NSFont.systemFont(ofSize: size, weight: .bold)
+            .font: NSFont.systemFont(ofSize: headingSize(for: level), weight: .bold)
         ], range: content)
 
         let paragraph = NSMutableParagraphStyle()
@@ -209,6 +253,9 @@ final class MarkdownRenderer {
         applyInline(inlines, to: attributed, theme: theme)
     }
 
+    // CHANGED: reuses cached CheckboxAttachment by lineRange.location + isChecked state.
+    // If the same attachment object is set on the storage, NSTextLayoutManager skips ViewProvider
+    // re-instantiation, eliminating the checkbox flicker on every keystroke.
     private func applyChecklist(
         marker: ChecklistMarker,
         markerRange: NSRange,
@@ -218,7 +265,6 @@ final class MarkdownRenderer {
         to attributed: NSMutableAttributedString,
         theme: AppTheme,
         context: MarkdownRenderContext
-        
     ) {
         guard let markerTextRange = safeRange(markerRange, in: attributed),
               let content = safeRange(contentRange, in: attributed),
@@ -228,24 +274,30 @@ final class MarkdownRenderer {
             .foregroundColor: NSColor(theme.textMuted),
             .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
         ], range: markerTextRange)
-        
-        // 1. 创建原生的 Checkbox 附件（解决问题 3）
+
         let isChecked = (marker == .checked)
-        let attachment = CheckboxAttachment(range: lineRange, isChecked: isChecked) { targetRange, checked in
-            context.onToggleChecklist(targetRange, checked)
+        let cacheKey = lineRange.location
+
+        let attachment: CheckboxAttachment
+        if let cached = checkboxCache[cacheKey], cached.isChecked == isChecked {
+            // Reuse same object — ViewProvider is NOT recreated by TextKit 2
+            cached.onToggle = context.onToggleChecklist
+            attachment = cached
+        } else {
+            attachment = CheckboxAttachment(
+                range: lineRange,
+                isChecked: isChecked,
+                onToggle: context.onToggleChecklist
+            )
+            checkboxCache[cacheKey] = attachment
         }
-        // 2. 将 Attachment 转为富文本属性
-        let attachmentString = NSAttributedString(attachment: attachment)
-        
-        // 3. 用 Attachment 替换掉原本的 "- [ ]" 或 "- [x]" 文本从而实现可点击
-        // 注意：直接 replace 改变长度会破坏后续 block 的 range。
-        // 最优雅的办法是不改变长度，把 attachment 属性直接赋予 marker 区域的第一个字符，并将其他字符隐藏或用空白代替
-        // 或者直接赋予整个 markerTextRange 区域：
-        attributed.addAttribute(.attachment, value: attachment, range: NSRange(location: markerTextRange.location, length: 1))
-        
-        // 将 marker 区域剩余的字符清空或虚化，避免文字和 checkbox 重叠
+
+        attributed.addAttribute(.attachment, value: attachment,
+                                range: NSRange(location: markerTextRange.location, length: 1))
+
         if markerTextRange.length > 1 {
-            let remainRange = NSRange(location: markerTextRange.location + 1, length: markerTextRange.length - 1)
+            let remainRange = NSRange(location: markerTextRange.location + 1,
+                                      length: markerTextRange.length - 1)
             attributed.addAttributes([
                 .foregroundColor: NSColor.clear,
                 .font: NSFont.systemFont(ofSize: 1)
@@ -256,13 +308,11 @@ final class MarkdownRenderer {
             .foregroundColor: NSColor(theme.textMain),
             .font: NSFont.systemFont(ofSize: 14, weight: .regular)
         ]
-
         if marker == .checked {
             contentAttributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
             contentAttributes[.strikethroughColor] = NSColor(theme.textMuted)
             contentAttributes[.foregroundColor] = NSColor(theme.textMuted)
         }
-
         attributed.addAttributes(contentAttributes, range: content)
 
         let paragraph = NSMutableParagraphStyle()
@@ -296,38 +346,38 @@ final class MarkdownRenderer {
     }
 
     private func applyListBlock(
-            markerRange: NSRange,
-            contentRange: NSRange,
-            lineRange: NSRange,
-            inlines: [MarkdownInline],
-            to attributed: NSMutableAttributedString,
-            theme: AppTheme,
-            indent: CGFloat
-        ) {
-            guard let marker = safeRange(markerRange, in: attributed),
-                  let content = safeRange(contentRange, in: attributed),
-                  let line = safeRange(lineRange, in: attributed) else { return }
+        markerRange: NSRange,
+        contentRange: NSRange,
+        lineRange: NSRange,
+        inlines: [MarkdownInline],
+        to attributed: NSMutableAttributedString,
+        theme: AppTheme,
+        indent: CGFloat
+    ) {
+        guard let marker = safeRange(markerRange, in: attributed),
+              let content = safeRange(contentRange, in: attributed),
+              let line = safeRange(lineRange, in: attributed) else { return }
 
-            attributed.addAttributes([
-                .foregroundColor: NSColor(theme.textMuted),
-                .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-            ], range: marker)
+        attributed.addAttributes([
+            .foregroundColor: NSColor(theme.textMuted),
+            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+        ], range: marker)
 
-            attributed.addAttributes([
-                .foregroundColor: NSColor(theme.textMain),
-                .font: NSFont.systemFont(ofSize: 14, weight: .regular)
-            ], range: content)
+        attributed.addAttributes([
+            .foregroundColor: NSColor(theme.textMain),
+            .font: NSFont.systemFont(ofSize: 14, weight: .regular)
+        ], range: content)
 
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.firstLineHeadIndent = 0
-            paragraph.headIndent = indent
-            paragraph.paragraphSpacing = 3
-            paragraph.lineSpacing = 1
-            attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.firstLineHeadIndent = 0
+        paragraph.headIndent = indent
+        paragraph.paragraphSpacing = 3
+        paragraph.lineSpacing = 1
+        attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
 
-            applyInline(inlines, to: attributed, theme: theme)
-        }
-    
+        applyInline(inlines, to: attributed, theme: theme)
+    }
+
     private func applyInline(_ inlines: [MarkdownInline], to attributed: NSMutableAttributedString, theme: AppTheme) {
         for inline in inlines {
             let markers = inline.markerRanges.compactMap { safeRange($0, in: attributed) }
@@ -369,6 +419,7 @@ final class MarkdownRenderer {
                     .font: NSFont.monospacedSystemFont(ofSize: 13.5, weight: .medium),
                     .backgroundColor: NSColor(theme.bgCitation)
                 ], range: contentRange)
+
             case .highlight:
                 attributed.addAttributes([
                     .foregroundColor: NSColor(theme.textMain),
@@ -390,10 +441,18 @@ final class MarkdownRenderer {
     }
 
     private func safeRange(_ range: NSRange, in attributed: NSAttributedString) -> NSRange? {
-        let length = attributed.length
-        guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= length else {
-            return nil
-        }
+        guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= attributed.length else { return nil }
         return range
+    }
+}
+
+// MARK: - NSRange overlap for block filtering
+
+private extension NSRange {
+    /// True when the two ranges share at least one character position.
+    /// Uses `<=` to correctly handle zero-length (point) ranges produced by deletions:
+    /// a point P overlaps any range [lo, hi] where lo <= P <= hi.
+    func overlaps(_ other: NSRange) -> Bool {
+        max(location, other.location) <= min(NSMaxRange(self), NSMaxRange(other))
     }
 }

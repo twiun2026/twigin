@@ -10,7 +10,7 @@ enum MarkdownAttachmentType {
 final class CheckboxAttachment: NSTextAttachment {
     let range: NSRange
     private(set) var isChecked: Bool
-    private let onToggle: (NSRange, Bool) -> Void
+    var onToggle: (NSRange, Bool) -> Void
 
     init(range: NSRange, isChecked: Bool, onToggle: @escaping (NSRange, Bool) -> Void) {
         self.range = range
