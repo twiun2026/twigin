@@ -4,6 +4,7 @@ struct MarkdownDocument {
     var source: String
     var blocks: [MarkdownBlock]
     var affectedRange: NSRange?
+    var blockDiff: MarkdownBlockDiff?
     var revision: Int
 }
 
@@ -16,8 +17,8 @@ final class MarkdownDocumentState {
         lines.flatMap(\.blocks)
     }
 
-    func makeDocument(source: String, affectedRange: NSRange?) -> MarkdownDocument {
-        MarkdownDocument(source: source, blocks: blocks, affectedRange: affectedRange, revision: revision)
+    func makeDocument(source: String, affectedRange: NSRange?, blockDiff: MarkdownBlockDiff? = nil) -> MarkdownDocument {
+        MarkdownDocument(source: source, blocks: blocks, affectedRange: affectedRange, blockDiff: blockDiff, revision: revision)
     }
 }
 
@@ -30,6 +31,23 @@ struct LineState {
     var outgoingState: ParserState
     var blocks: [MarkdownBlock]
     var containsUnresolvedSyntax: Bool
+
+    var semanticSignature: UInt64 {
+        MarkdownStableHash.hash(
+            [
+                incomingState.stableKey,
+                outgoingState.stableKey,
+                containsUnresolvedSyntax ? "1" : "0",
+                String(textHash)
+            ] + blocks.map { String($0.id) }
+        )
+    }
+
+    func isPropagationStable(comparedTo other: LineState) -> Bool {
+        incomingState.isSemanticallyEqual(to: other.incomingState)
+            && outgoingState.isSemanticallyEqual(to: other.outgoingState)
+            && semanticSignature == other.semanticSignature
+    }
 
     func shifted(by delta: Int, lineIndex: Int? = nil) -> LineState {
         LineState(
@@ -45,23 +63,135 @@ struct LineState {
     }
 }
 
-enum ParserState: Hashable {
-    case normal
-    case inBlockquote
-    case inCodeBlock
-    case inList(indent: Int)
+struct ParserState: Hashable {
+    struct CodeFenceState: Hashable {
+        var fenceToken: String
+    }
+
+    struct ListContext: Hashable {
+        enum Kind: String, Hashable {
+            case bullet
+            case ordered
+            case checklist
+        }
+
+        var kind: Kind
+        var indent: Int
+    }
+
+    enum HTMLBlockState: String, Hashable {
+        case inactive
+        case active
+    }
+
+    enum TableState: String, Hashable {
+        case inactive
+        case active
+    }
+
+    enum FootnoteState: String, Hashable {
+        case inactive
+        case active
+    }
+
+    enum ReferenceDefinitionState: String, Hashable {
+        case inactive
+        case active
+    }
+
+    enum MathBlockState: String, Hashable {
+        case inactive
+        case active
+    }
+
+    var codeFence: CodeFenceState?
+    var quoteDepth: Int
+    var listStack: [ListContext]
+    var htmlBlock: HTMLBlockState
+    var table: TableState
+    var footnote: FootnoteState
+    var referenceDefinition: ReferenceDefinitionState
+    var mathBlock: MathBlockState
+
+    static let normal = ParserState(
+        codeFence: nil,
+        quoteDepth: 0,
+        listStack: [],
+        htmlBlock: .inactive,
+        table: .inactive,
+        footnote: .inactive,
+        referenceDefinition: .inactive,
+        mathBlock: .inactive
+    )
+
+    var isInCodeFence: Bool {
+        codeFence != nil
+    }
+
+    var listIndent: Int? {
+        listStack.last?.indent
+    }
+
+    func settingCodeFence(_ fence: CodeFenceState?) -> ParserState {
+        var copy = self
+        copy.codeFence = fence
+        return copy
+    }
+
+    func settingQuoteDepth(_ depth: Int) -> ParserState {
+        var copy = self
+        copy.quoteDepth = max(0, depth)
+        return copy
+    }
+
+    func settingListStack(_ stack: [ListContext]) -> ParserState {
+        var copy = self
+        copy.listStack = stack
+        return copy
+    }
+
+    func isSemanticallyEqual(to other: ParserState) -> Bool {
+        self == other
+    }
 
     var stableKey: String {
-        switch self {
-        case .normal:
-            return "normal"
-        case .inBlockquote:
-            return "blockquote"
-        case .inCodeBlock:
-            return "code"
-        case let .inList(indent):
-            return "list:\(indent)"
+        let fenceKey = codeFence?.fenceToken ?? "-"
+        let listKey = listStack.map { "\($0.kind.rawValue):\($0.indent)" }.joined(separator: ",")
+        return [
+            "code:\(fenceKey)",
+            "quote:\(quoteDepth)",
+            "list:[\(listKey)]",
+            "html:\(htmlBlock.rawValue)",
+            "table:\(table.rawValue)",
+            "footnote:\(footnote.rawValue)",
+            "ref:\(referenceDefinition.rawValue)",
+            "math:\(mathBlock.rawValue)"
+        ].joined(separator: "|")
+    }
+}
+
+struct MarkdownBlockDiff {
+    enum Operation {
+        case insert(MarkdownBlock)
+        case delete(MarkdownBlock)
+        case modify(old: MarkdownBlock, new: MarkdownBlock)
+
+        var newBlock: MarkdownBlock? {
+            switch self {
+            case let .insert(block):
+                return block
+            case .delete:
+                return nil
+            case let .modify(_, new):
+                return new
+            }
         }
+    }
+
+    var operations: [Operation]
+
+    var isEmpty: Bool {
+        operations.isEmpty
     }
 }
 

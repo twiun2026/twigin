@@ -15,6 +15,20 @@ final class MarkdownParser {
         let outgoingState: ParserState
     }
 
+    private struct ParsedLineWindow {
+        var lowerBound: Int
+        var upperBound: Int
+
+        mutating func include(_ lineIndex: Int) {
+            lowerBound = min(lowerBound, lineIndex)
+            upperBound = max(upperBound, lineIndex)
+        }
+
+        var range: Range<Int> {
+            lowerBound..<(upperBound + 1)
+        }
+    }
+
     private let headingRegex = try! NSRegularExpression(pattern: "^(\\s{0,3})(#{1,6})(?:\\s+|$)(.*)$")
     private let checklistRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[( |x|X)\\]\\s*)(.*)$")
     private let unorderedListRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+)(.*)$")
@@ -71,6 +85,7 @@ final class MarkdownParser {
 
         var reconciled: [LineState] = forceFull ? [] : Array(oldLines.prefix(startLine))
         var reparsedRange: NSRange?
+        var parsedWindow: ParsedLineWindow?
         var lineIndexCursor = startLine
         var shortCircuited = false
 
@@ -79,6 +94,23 @@ final class MarkdownParser {
             let parsedLine = parseLine(newLines[lineIndexCursor], incomingState: incomingState)
             reconciled.append(parsedLine)
             reparsedRange = union(reparsedRange, parsedLine.lineRange)
+            if var window = parsedWindow {
+                window.include(lineIndexCursor)
+                parsedWindow = window
+            } else {
+                parsedWindow = ParsedLineWindow(lowerBound: lineIndexCursor, upperBound: lineIndexCursor)
+            }
+
+            if let stableAnchor = stablePropagationAnchor(
+                for: parsedLine,
+                newLineIndex: lineIndexCursor,
+                allNewLines: newLines,
+                shiftedOldLines: shiftedOldLines
+            ) {
+                appendShiftedSuffix(from: stableAnchor, shiftedOldLines: shiftedOldLines, into: &reconciled)
+                shortCircuited = true
+                break
+            }
 
             if let suffixAnchor = reusableSuffixAnchor(
                 for: parsedLine,
@@ -88,12 +120,7 @@ final class MarkdownParser {
                 reuseMap: reuseMap,
                 minimumOldIndex: startLine
             ) {
-                let suffixStart = suffixAnchor + 1
-                if suffixStart < shiftedOldLines.count {
-                    for oldLine in shiftedOldLines[suffixStart...] {
-                        reconciled.append(oldLine.shifted(by: 0, lineIndex: reconciled.count))
-                    }
-                }
+                appendShiftedSuffix(from: suffixAnchor, shiftedOldLines: shiftedOldLines, into: &reconciled)
                 shortCircuited = true
                 break
             }
@@ -108,6 +135,12 @@ final class MarkdownParser {
                 let parsedLine = parseLine(newLines[index], incomingState: incomingState)
                 reconciled.append(parsedLine)
                 reparsedRange = union(reparsedRange, parsedLine.lineRange)
+                if var window = parsedWindow {
+                    window.include(index)
+                    parsedWindow = window
+                } else {
+                    parsedWindow = ParsedLineWindow(lowerBound: index, upperBound: index)
+                }
             }
         }
 
@@ -117,13 +150,36 @@ final class MarkdownParser {
             }
         }
 
-        state.lines = reconciled.enumerated().map { index, line in
+        let normalizedLines = reconciled.enumerated().map { index, line in
             line.shifted(by: 0, lineIndex: index)
         }
+        state.lines = normalizedLines
         state.totalLength = (source as NSString).length
         state.revision += 1
 
-        return state.makeDocument(source: source, affectedRange: reparsedRange)
+        let blockDiff: MarkdownBlockDiff?
+        if let parsedWindow {
+            let changedRange = parsedWindow.range
+            let diff = buildBlockDiff(
+                oldLines: shiftedOldLines,
+                newLines: normalizedLines,
+                changedLines: changedRange
+            )
+            blockDiff = diff.isEmpty ? nil : diff
+        } else {
+            blockDiff = nil
+        }
+
+        return state.makeDocument(source: source, affectedRange: reparsedRange, blockDiff: blockDiff)
+    }
+
+    private func appendShiftedSuffix(from anchor: Int, shiftedOldLines: [LineState], into reconciled: inout [LineState]) {
+        let suffixStart = anchor + 1
+        guard suffixStart < shiftedOldLines.count else { return }
+
+        for oldLine in shiftedOldLines[suffixStart...] {
+            reconciled.append(oldLine.shifted(by: 0, lineIndex: reconciled.count))
+        }
     }
 
     private func buildLines(from source: String) -> [SourceLine] {
@@ -235,19 +291,91 @@ final class MarkdownParser {
         return nil
     }
 
+    private func stablePropagationAnchor(
+        for line: LineState,
+        newLineIndex: Int,
+        allNewLines: [SourceLine],
+        shiftedOldLines: [LineState]
+    ) -> Int? {
+        guard newLineIndex < shiftedOldLines.count else { return nil }
+
+        let previousLine = shiftedOldLines[newLineIndex]
+        guard previousLine.lineRange == line.lineRange else { return nil }
+        guard line.isPropagationStable(comparedTo: previousLine) else { return nil }
+
+        let remainingNew = allNewLines.count - (newLineIndex + 1)
+        let remainingOld = shiftedOldLines.count - (newLineIndex + 1)
+        guard remainingNew == remainingOld else { return nil }
+
+        if newLineIndex + 1 < allNewLines.count {
+            let nextTextHash = hashText(allNewLines[newLineIndex + 1].text)
+            guard nextTextHash == shiftedOldLines[newLineIndex + 1].textHash else { return nil }
+        }
+
+        return newLineIndex
+    }
+
+    private func buildBlockDiff(
+        oldLines: [LineState],
+        newLines: [LineState],
+        changedLines: Range<Int>
+    ) -> MarkdownBlockDiff {
+        var operations: [MarkdownBlockDiff.Operation] = []
+
+        for lineIndex in changedLines {
+            let oldBlocks = lineIndex < oldLines.count ? oldLines[lineIndex].blocks : []
+            let newBlocks = lineIndex < newLines.count ? newLines[lineIndex].blocks : []
+            operations.append(contentsOf: diffBlocks(old: oldBlocks, new: newBlocks))
+        }
+
+        return MarkdownBlockDiff(operations: operations)
+    }
+
+    private func diffBlocks(old: [MarkdownBlock], new: [MarkdownBlock]) -> [MarkdownBlockDiff.Operation] {
+        if old.isEmpty {
+            return new.map { .insert($0) }
+        }
+
+        if new.isEmpty {
+            return old.map { .delete($0) }
+        }
+
+        var operations: [MarkdownBlockDiff.Operation] = []
+        let pairedCount = min(old.count, new.count)
+
+        for index in 0..<pairedCount {
+            let oldBlock = old[index]
+            let newBlock = new[index]
+            if oldBlock != newBlock {
+                operations.append(.modify(old: oldBlock, new: newBlock))
+            }
+        }
+
+        if old.count > pairedCount {
+            operations.append(contentsOf: old[pairedCount...].map { .delete($0) })
+        }
+
+        if new.count > pairedCount {
+            operations.append(contentsOf: new[pairedCount...].map { .insert($0) })
+        }
+
+        return operations
+    }
+
     private func parseLine(_ line: SourceLine, incomingState: ParserState) -> LineState {
         let textHash = hashText(line.text)
         let nsText = line.text as NSString
         let fullRange = NSRange(location: 0, length: nsText.length)
         let trimmed = line.text.trimmingCharacters(in: .whitespaces)
 
-        if case .inCodeBlock = incomingState {
+        if incomingState.isInCodeFence {
             let closesFence = fenceRegex.firstMatch(in: line.text, range: fullRange) != nil
+            let outgoingState = closesFence ? incomingState.settingCodeFence(nil) : incomingState
             let block = makeBlock(kind: .codeBlock, line: line, markerRange: nil, contentRange: line.range, inlines: [])
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: closesFence ? .normal : .inCodeBlock,
+                outgoingState: outgoingState,
                 blocks: [block],
                 textHash: textHash,
                 containsUnresolvedSyntax: false
@@ -258,7 +386,10 @@ final class MarkdownParser {
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: .normal,
+                outgoingState: incomingState
+                    .settingCodeFence(nil)
+                    .settingQuoteDepth(0)
+                    .settingListStack([]),
                 blocks: [],
                 textHash: textHash,
                 containsUnresolvedSyntax: false
@@ -266,11 +397,12 @@ final class MarkdownParser {
         }
 
         if fenceRegex.firstMatch(in: line.text, range: fullRange) != nil {
+            let fenceState = ParserState.CodeFenceState(fenceToken: fenceToken(in: line.text))
             let block = makeBlock(kind: .codeBlock, line: line, markerRange: nil, contentRange: line.range, inlines: [])
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: .inCodeBlock,
+                outgoingState: incomingState.settingCodeFence(fenceState),
                 blocks: [block],
                 textHash: textHash,
                 containsUnresolvedSyntax: false
@@ -290,7 +422,7 @@ final class MarkdownParser {
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: .normal,
+                outgoingState: incomingState.settingQuoteDepth(0).settingListStack([]),
                 blocks: [block],
                 textHash: textHash,
                 containsUnresolvedSyntax: false
@@ -315,7 +447,9 @@ final class MarkdownParser {
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: .inList(indent: leadingIndent(in: line.text)),
+                outgoingState: incomingState.settingListStack([
+                    ParserState.ListContext(kind: .checklist, indent: leadingIndent(in: line.text))
+                ]),
                 blocks: [block],
                 textHash: textHash,
                 containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
@@ -337,7 +471,7 @@ final class MarkdownParser {
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: .inBlockquote,
+                outgoingState: incomingState.settingQuoteDepth(leadingQuoteDepth(in: line.text)),
                 blocks: [block],
                 textHash: textHash,
                 containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
@@ -362,7 +496,9 @@ final class MarkdownParser {
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: .inList(indent: leading.length),
+                outgoingState: incomingState.settingListStack([
+                    ParserState.ListContext(kind: .ordered, indent: leading.length)
+                ]),
                 blocks: [block],
                 textHash: textHash,
                 containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
@@ -384,7 +520,9 @@ final class MarkdownParser {
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: .inList(indent: leadingIndent(in: line.text)),
+                outgoingState: incomingState.settingListStack([
+                    ParserState.ListContext(kind: .bullet, indent: leadingIndent(in: line.text))
+                ]),
                 blocks: [block],
                 textHash: textHash,
                 containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
@@ -404,14 +542,14 @@ final class MarkdownParser {
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: .normal,
+                outgoingState: incomingState.settingQuoteDepth(0).settingListStack([]),
                 blocks: [block],
                 textHash: textHash,
                 containsUnresolvedSyntax: false
             )
         }
 
-        if case let .inList(indent) = incomingState,
+        if let indent = incomingState.listIndent,
            leadingIndent(in: line.text) > indent {
             let block = makeBlock(
                 kind: .paragraph,
@@ -423,7 +561,7 @@ final class MarkdownParser {
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: .inList(indent: indent),
+                outgoingState: incomingState,
                 blocks: [block],
                 textHash: textHash,
                 containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: line.text)
@@ -440,7 +578,7 @@ final class MarkdownParser {
         return makeLineState(
             line: line,
             incomingState: incomingState,
-            outgoingState: .normal,
+            outgoingState: incomingState.settingQuoteDepth(0).settingListStack([]),
             blocks: [block],
             textHash: textHash,
             containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: line.text)
@@ -615,6 +753,38 @@ final class MarkdownParser {
 
     private func leadingIndent(in text: String) -> Int {
         text.prefix { $0 == " " || $0 == "\t" }.count
+    }
+
+    private func leadingQuoteDepth(in text: String) -> Int {
+        let characters = Array(text)
+        var cursor = 0
+        var depth = 0
+
+        while cursor < characters.count {
+            while cursor < characters.count, characters[cursor] == " " {
+                cursor += 1
+            }
+
+            guard cursor < characters.count, characters[cursor] == ">" else {
+                break
+            }
+
+            depth += 1
+            cursor += 1
+
+            if cursor < characters.count, characters[cursor] == " " {
+                cursor += 1
+            }
+        }
+
+        return depth
+    }
+
+    private func fenceToken(in text: String) -> String {
+        if text.contains("~~~") {
+            return "~~~"
+        }
+        return "```"
     }
 
     private func trimmingNewline(_ range: NSRange, in ns: NSString) -> NSRange {

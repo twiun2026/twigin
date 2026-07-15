@@ -67,20 +67,53 @@ final class MarkdownRenderer {
         let storageLength = textStorage.length
         guard storageLength > 0 else { return }
 
-        let applyRange = clampedApplyRange(for: context.document, storageLength: storageLength)
-        let affectedBlocks = context.document.blocks.filter { $0.lineRange.overlaps(applyRange) }
+        let renderPlan = makeRenderPlan(document: context.document, storageLength: storageLength)
+        guard !renderPlan.ranges.isEmpty else { return }
         let liveKeys = Set(context.document.blocks.compactMap(checkboxKey(for:)))
         checkboxCache = checkboxCache.filter { liveKeys.contains($0.key) }
 
         textStorage.beginEditing()
-        clearAttributes(in: applyRange, storage: textStorage)
-        textStorage.addAttributes(baseAttributes(theme: context.theme), range: applyRange)
-        for block in affectedBlocks {
+        for range in renderPlan.ranges {
+            clearAttributes(in: range, storage: textStorage)
+            textStorage.addAttributes(baseAttributes(theme: context.theme), range: range)
+        }
+        for block in renderPlan.blocks {
             applyBlock(block, to: textStorage, theme: context.theme, context: context)
         }
         textStorage.endEditing()
 
-        invalidateLayout(in: context.textView, affectedRange: applyRange)
+        invalidateLayout(in: context.textView, affectedRanges: renderPlan.ranges)
+    }
+
+    private struct RenderPlan {
+        var ranges: [NSRange]
+        var blocks: [MarkdownBlock]
+    }
+
+    private func makeRenderPlan(document: MarkdownDocument, storageLength: Int) -> RenderPlan {
+        if let blockDiff = document.blockDiff, !blockDiff.isEmpty {
+            var ranges: [NSRange] = []
+            var blocks: [MarkdownBlock] = []
+
+            for operation in blockDiff.operations {
+                switch operation {
+                case let .insert(block):
+                    ranges.append(clamp(range: block.lineRange, storageLength: storageLength))
+                    blocks.append(block)
+                case let .modify(_, new):
+                    ranges.append(clamp(range: new.lineRange, storageLength: storageLength))
+                    blocks.append(new)
+                case let .delete(block):
+                    ranges.append(clamp(range: block.lineRange, storageLength: storageLength))
+                }
+            }
+
+            return RenderPlan(ranges: mergeRanges(ranges), blocks: blocks)
+        }
+
+        let applyRange = clampedApplyRange(for: document, storageLength: storageLength)
+        let affectedBlocks = document.blocks.filter { $0.lineRange.overlaps(applyRange) }
+        return RenderPlan(ranges: applyRange.length > 0 ? [applyRange] : [], blocks: affectedBlocks)
     }
 
     private func clampedApplyRange(for document: MarkdownDocument, storageLength: Int) -> NSRange {
@@ -91,27 +124,62 @@ final class MarkdownRenderer {
     }
 
     private func clearAttributes(in range: NSRange, storage: NSTextStorage) {
+        guard range.length > 0 else { return }
         for key in attributesToClear {
             storage.removeAttribute(key, range: range)
         }
     }
 
-    private func invalidateLayout(in textView: MarkdownNativeTextView, affectedRange: NSRange) {
+    private func invalidateLayout(in textView: MarkdownNativeTextView, affectedRanges: [NSRange]) {
         guard let textLayoutManager = textView.textLayoutManager,
               let textContentManager = textLayoutManager.textContentManager else {
             return
         }
 
+        guard !affectedRanges.isEmpty else { return }
         let documentRange = textContentManager.documentRange
 
-        guard let start = textContentManager.location(documentRange.location, offsetBy: affectedRange.location),
-              let end = textContentManager.location(start, offsetBy: affectedRange.length),
-              let textRange = NSTextRange(location: start, end: end) else {
-            return
+        for affectedRange in affectedRanges {
+            guard affectedRange.length > 0,
+                  let start = textContentManager.location(documentRange.location, offsetBy: affectedRange.location),
+                  let end = textContentManager.location(start, offsetBy: affectedRange.length),
+                  let textRange = NSTextRange(location: start, end: end) else {
+                continue
+            }
+
+            textLayoutManager.invalidateLayout(for: textRange)
+            textLayoutManager.ensureLayout(for: textRange)
+        }
+    }
+
+    private func mergeRanges(_ ranges: [NSRange]) -> [NSRange] {
+        let sorted = ranges.filter { $0.length > 0 }.sorted { lhs, rhs in
+            if lhs.location == rhs.location {
+                return lhs.length < rhs.length
+            }
+            return lhs.location < rhs.location
         }
 
-        textLayoutManager.invalidateLayout(for: textRange)
-        textLayoutManager.ensureLayout(for: textRange)
+        guard !sorted.isEmpty else { return [] }
+
+        var merged: [NSRange] = [sorted[0]]
+        for range in sorted.dropFirst() {
+            guard let last = merged.last else { continue }
+            if NSMaxRange(last) >= range.location {
+                let union = NSUnionRange(last, range)
+                merged[merged.count - 1] = union
+            } else {
+                merged.append(range)
+            }
+        }
+
+        return merged
+    }
+
+    private func clamp(range: NSRange, storageLength: Int) -> NSRange {
+        let lowerBound = min(max(range.location, 0), storageLength)
+        let upperBound = min(max(NSMaxRange(range), lowerBound), storageLength)
+        return NSRange(location: lowerBound, length: upperBound - lowerBound)
     }
 
     private func checkboxKey(for block: MarkdownBlock) -> Int? {

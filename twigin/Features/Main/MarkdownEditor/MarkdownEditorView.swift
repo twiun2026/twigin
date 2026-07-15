@@ -119,7 +119,7 @@ struct MarkdownTextView: NSViewRepresentable {
         private let parser = MarkdownParser()
         private let renderer = MarkdownRenderer()
         private let documentState = MarkdownDocumentState()
-        private var document = MarkdownDocument(source: "", blocks: [], affectedRange: nil, revision: 0)
+        private var document = MarkdownDocument(source: "", blocks: [], affectedRange: nil, blockDiff: nil, revision: 0)
 
         init(parent: MarkdownTextView) {
             self.parent = parent
@@ -193,7 +193,7 @@ struct MarkdownTextView: NSViewRepresentable {
                 .init(
                     textView: textView,
                     theme: parent.theme,
-                    document: MarkdownDocument(source: document.source, blocks: document.blocks, affectedRange: nil, revision: document.revision),
+                    document: MarkdownDocument(source: document.source, blocks: document.blocks, affectedRange: nil, blockDiff: nil, revision: document.revision),
                     onToggleChecklist: { [weak self] range, isChecked in
                         self?.toggleChecklist(in: range, to: isChecked)
                     },
