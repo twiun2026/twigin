@@ -6,6 +6,7 @@ struct AppTheme: Identifiable, Equatable {
     
     let bgNoteList: Color
     let textHeader: Color
+    let bgSelected: Color
     let textMain: Color
     let textMuted: Color
     let bgFolderList: Color

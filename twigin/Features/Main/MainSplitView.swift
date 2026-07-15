@@ -1,5 +1,10 @@
 import SwiftUI
 
+enum ActiveFocusColumn: Hashable {
+    case folderList
+    case noteList
+}
+
 struct MainSplitView: View {
     @EnvironmentObject private var themeManager: ThemeManager
     @StateObject private var folderViewModel = FolderListViewModel()
@@ -9,11 +14,12 @@ struct MainSplitView: View {
     @State private var selectedNoteId: NoteModel.ID?
     
     @FocusState private var isNewFolderFocused: Bool
+    @FocusState private var focusedColumn: ActiveFocusColumn?
     
     var body: some View {
         NavigationSplitView {
             // Left Pane: Folders
-            List(selection: $selectedFolderId) {
+            List {
                 ForEach(folderViewModel.folders) { folder in
                     FolderRowView(
                         folder: folder,
@@ -22,7 +28,25 @@ struct MainSplitView: View {
                             folderViewModel.renameFolder(id: folder.id, newTitle: newTitle)
                         }
                     )
-                    .tag(folder.id)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        selectedFolderId = folder.id
+                        focusedColumn = .folderList
+                    }
+                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(
+                        Group {
+                            if selectedFolderId == folder.id {
+                                let color = themeManager.currentTheme.bgSelected
+                                let targetColor = focusedColumn == .folderList ? color : color.opacity(0.5)
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(targetColor)
+                            }
+                        }
+                    )
+                    .listRowBackground(Color.clear)
                     .contextMenu {
                         if folder.folderId != "recently_deleted" {
                             Button("Rename Folder") {
@@ -33,19 +57,12 @@ struct MainSplitView: View {
                             }
                             Divider()
                         }
-                        
                         Button("New Folder") {
                             folderViewModel.startCreatingNewFolder()
                         }
-                        
                         Divider()
-                        
-                        Button("Share Folder") {
-                            // Placeholder for sharing functionality
-                        }
-                        
+                        Button("Share Folder") { }
                         Divider()
-                        
                         Menu("Sort By") {
                             Button("Default (Date Edited)") { folderViewModel.sortOption = .dateEdited }
                             Button("Dated Created") { folderViewModel.sortOption = .dateCreated }
@@ -77,22 +94,41 @@ struct MainSplitView: View {
             .toolbarBackground(.hidden, for: .windowToolbar)
             .scrollContentBackground(.hidden)
             .background(themeManager.currentTheme.bgFolderList)
+            .focused($focusedColumn, equals: .folderList)
+            
         } content: {
             // Middle Pane: Notes
-            List(selection: $selectedNoteId) {
+            List {
                 ForEach(noteViewModel.notes) { note in
                     Text(note.title)
                         .foregroundColor(themeManager.currentTheme.textMain)
-                        .tag(note.id)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            selectedNoteId = note.id
+                            focusedColumn = .noteList
+                        }
+                        .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 12)
+                        .background(
+                            Group {
+                                if selectedNoteId == note.id {
+                                    let color = themeManager.currentTheme.bgSelected
+                                    let targetColor = focusedColumn == .noteList ? color : color.opacity(0.5)
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(targetColor)
+                                }
+                            }
+                        )
+                        .listRowBackground(Color.clear)
                         .contextMenu {
                             Button("New Note") {
                                 if let folderId = selectedFolderId {
                                     noteViewModel.createNote(in: folderId)
                                 }
                             }
-                            Button("Pin Note") {
-                                // Placeholder for pinning functionality
-                            }
+                            Button("Pin Note") { }
                             Divider()
                             Button("Delete Note", role: .destructive) {
                                 if let folderId = selectedFolderId {
@@ -105,6 +141,7 @@ struct MainSplitView: View {
             .navigationTitle("Notes")
             .scrollContentBackground(.hidden)
             .background(themeManager.currentTheme.bgNoteList)
+            .focused($focusedColumn, equals: .noteList)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -135,6 +172,7 @@ struct MainSplitView: View {
         .onChange(of: selectedFolderId) { _, newFolderId in
             if let newFolderId = newFolderId {
                 noteViewModel.loadNotes(for: newFolderId)
+                focusedColumn = .noteList
             } else {
                 noteViewModel.clearNotes()
                 selectedNoteId = nil
