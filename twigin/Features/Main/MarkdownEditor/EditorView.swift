@@ -33,15 +33,10 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.insertionPointColor = NSColor(theme.textMain)
         textView.font = resolvedFont()
 
-        // bind() and delegate must be set BEFORE string assignment so willProcessEditing
-        // fires with a valid textView reference.
         context.coordinator.bind(textView: textView)
         textView.textStorage?.delegate = context.coordinator
 
         textView.string = text
-        // willProcessEditing parses but does NOT render (no textDidChange fires for
-        // programmatic string assignment). Clear the stale pendingEditedRange and do
-        // an explicit full render to apply initial markdown styling.
         context.coordinator.pendingEditedRange = nil
         context.coordinator.lastRenderedTheme = theme
         context.coordinator.lastRenderedFontName = fontName
@@ -61,7 +56,6 @@ struct MarkdownTextView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
-        // Keep coordinator's copy of parent in sync so willProcessEditing sees the latest theme
         context.coordinator.parent = self
 
         guard let textView = nsView.documentView as? MarkdownNativeTextView else { return }
@@ -77,9 +71,6 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         if textView.string != text {
-            // External content change (note switch): set string, then full render.
-            // textDidChange does NOT fire for programmatic string assignment, so we
-            // must render explicitly. Clear any stale pendingEditedRange first.
             textView.string = text
             context.coordinator.pendingEditedRange = nil
             context.coordinator.lastRenderedTheme = theme
@@ -91,16 +82,31 @@ struct MarkdownTextView: NSViewRepresentable {
                || context.coordinator.lastRenderedLineSpacing != lineSpacing {
             context.coordinator.refreshFull()
         }
-        // text == textView.string && theme unchanged → user typed a character.
-        // willProcessEditing already applied attributes atomically. Nothing to do.
     }
 
     private func resolvedFont() -> NSFont {
         let size: CGFloat = 14
+        let primaryFont: NSFont
+        
+        // 1. 设置主字体（通常在设置中用户选中的英文/等宽字体，即 fontName）
         if !fontName.isEmpty, let font = NSFont(name: fontName, size: size) {
-            return font
+            primaryFont = font
+        } else {
+            primaryFont = NSFont.systemFont(ofSize: size)
         }
-        return NSFont.systemFont(ofSize: size, weight: .regular)
+        
+        // 2. 指定中文默认字体的 Fallback 链（优先使用“苹方-简”）
+        let chineseFontNames = ["PingFangSC-Regular", "Heiti SC", "Microsoft YaHei"]
+        let fallbackDescriptors = chineseFontNames.compactMap { name -> NSFontDescriptor? in
+            return NSFontDescriptor(name: name, size: size)
+        }
+        
+        // 3. 将中文 fallback 链绑定到主字体描述符中
+        let cascadedDescriptor = primaryFont.fontDescriptor.addingAttributes([
+            .cascadeList: fallbackDescriptors
+        ])
+        
+        return NSFont(descriptor: cascadedDescriptor, size: size) ?? primaryFont
     }
 
     // MARK: - Coordinator
@@ -108,11 +114,9 @@ struct MarkdownTextView: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
         var parent: MarkdownTextView
         weak var textView: MarkdownNativeTextView?
-        /// Tracks the theme used in the last full render; drives theme-change detection in updateNSView.
         var lastRenderedTheme: AppTheme? = nil
         var lastRenderedFontName: String = ""
         var lastRenderedLineSpacing: CGFloat = 0
-        /// Set by willProcessEditing; consumed by textDidChange to render the affected blocks.
         var pendingEditedRange: NSRange? = nil
 
         private let renderer = MarkdownRenderer()
@@ -135,10 +139,11 @@ struct MarkdownTextView: NSViewRepresentable {
             changeInLength delta: Int
         ) {
             guard editedMask.contains(.editedCharacters) else { return }
-            // Parse only — do NOT call setAttributes here.
-            // Calling setAttributes inside willProcessEditing expands the internal
-            // editedRange that NSTextView uses to reposition the cursor after
-            // processEditing, which causes the cursor to jump to the paragraph end.
+            // 如果当前正在输入中文/日文拼音（有标记文本），
+            // 绝对不重新解析 Markdown，避免不必要的 AST 解析卡顿
+            if let textView = self.textView, textView.hasMarkedText() {
+                return
+            }
             document = renderer.parse(source: textStorage.string)
             pendingEditedRange = editedRange
         }
@@ -148,11 +153,13 @@ struct MarkdownTextView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
             parent.text = textView.string
-
-            // Render here: NSTextView has already placed the cursor at the correct
-            // post-edit position. This call runs synchronously before the next screen
-            // refresh, so no jitter — TextKit 2 detects unchanged attributes and skips
-            // re-layout for the common case (typing in a plain paragraph).
+            
+            // 如果当前正在输入中文/日文拼音（有标记文本），
+            // 绝对不执行任何渲染和重新高亮，避免打断输入法，防止光标乱跳和候选框闪烁
+            if textView.hasMarkedText() {
+                return
+            }
+        
             guard let editedRange = pendingEditedRange else { return }
             pendingEditedRange = nil
             renderer.bodyFontName = parent.fontName
@@ -306,5 +313,4 @@ struct MarkdownTextView: NSViewRepresentable {
     }
 }
 
-// MarkdownNativeTextView: onWillReplaceText removed — rendering now uses NSTextStorageDelegate
 final class MarkdownNativeTextView: NSTextView {}
