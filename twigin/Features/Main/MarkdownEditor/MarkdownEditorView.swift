@@ -37,7 +37,6 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.textStorage?.delegate = context.coordinator
 
         textView.string = text
-        context.coordinator.pendingEditedRange = nil
         context.coordinator.lastRenderedTheme = theme
         context.coordinator.lastRenderedFontName = fontName
         context.coordinator.lastRenderedLineSpacing = lineSpacing
@@ -72,7 +71,6 @@ struct MarkdownTextView: NSViewRepresentable {
 
         if textView.string != text {
             textView.string = text
-            context.coordinator.pendingEditedRange = nil
             context.coordinator.lastRenderedTheme = theme
             context.coordinator.lastRenderedFontName = fontName
             context.coordinator.lastRenderedLineSpacing = lineSpacing
@@ -117,10 +115,11 @@ struct MarkdownTextView: NSViewRepresentable {
         var lastRenderedTheme: AppTheme? = nil
         var lastRenderedFontName: String = ""
         var lastRenderedLineSpacing: CGFloat = 0
-        var pendingEditedRange: NSRange? = nil
 
+        private let parser = MarkdownParser()
         private let renderer = MarkdownRenderer()
-        private var document = MarkdownDocument(source: "", blocks: [])
+        private let documentState = MarkdownDocumentState()
+        private var document = MarkdownDocument(source: "", blocks: [], affectedRange: nil, revision: 0)
 
         init(parent: MarkdownTextView) {
             self.parent = parent
@@ -139,13 +138,14 @@ struct MarkdownTextView: NSViewRepresentable {
             changeInLength delta: Int
         ) {
             guard editedMask.contains(.editedCharacters) else { return }
-            // 如果当前正在输入中文/日文拼音（有标记文本），
-            // 绝对不重新解析 Markdown，避免不必要的 AST 解析卡顿
-            if let textView = self.textView, textView.hasMarkedText() {
+
+            if let textView, textView.hasMarkedText() {
+                parser.syncTextOnly(source: textStorage.string, state: documentState)
+                document = documentState.makeDocument(source: textStorage.string, affectedRange: nil)
                 return
             }
-            document = renderer.parse(source: textStorage.string)
-            pendingEditedRange = editedRange
+
+            document = parser.update(source: textStorage.string, editedRange: editedRange, changeInLength: delta, state: documentState)
         }
 
         // MARK: NSTextViewDelegate
@@ -153,15 +153,12 @@ struct MarkdownTextView: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let textView else { return }
             parent.text = textView.string
-            
-            // 如果当前正在输入中文/日文拼音（有标记文本），
-            // 绝对不执行任何渲染和重新高亮，避免打断输入法，防止光标乱跳和候选框闪烁
+
             if textView.hasMarkedText() {
                 return
             }
-        
-            guard let editedRange = pendingEditedRange else { return }
-            pendingEditedRange = nil
+
+            guard document.affectedRange != nil else { return }
             renderer.bodyFontName = parent.fontName
             renderer.lineSpacingMultiplier = parent.lineSpacing
             renderer.render(
@@ -169,7 +166,6 @@ struct MarkdownTextView: NSViewRepresentable {
                     textView: textView,
                     theme: parent.theme,
                     document: document,
-                    editedRange: editedRange,
                     onToggleChecklist: { [weak self] range, isChecked in
                         self?.toggleChecklist(in: range, to: isChecked)
                     },
@@ -178,6 +174,10 @@ struct MarkdownTextView: NSViewRepresentable {
                     }
                 )
             )
+
+            lastRenderedTheme = parent.theme
+            lastRenderedFontName = parent.fontName
+            lastRenderedLineSpacing = parent.lineSpacing
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {}
@@ -188,13 +188,12 @@ struct MarkdownTextView: NSViewRepresentable {
             guard let textView else { return }
             renderer.bodyFontName = parent.fontName
             renderer.lineSpacingMultiplier = parent.lineSpacing
-            document = renderer.parse(source: textView.string)
+            document = parser.reparseAll(source: textView.string, state: documentState)
             renderer.render(
                 .init(
                     textView: textView,
                     theme: parent.theme,
-                    document: document,
-                    editedRange: nil,
+                    document: MarkdownDocument(source: document.source, blocks: document.blocks, affectedRange: nil, revision: document.revision),
                     onToggleChecklist: { [weak self] range, isChecked in
                         self?.toggleChecklist(in: range, to: isChecked)
                     },

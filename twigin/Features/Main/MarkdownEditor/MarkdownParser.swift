@@ -1,295 +1,643 @@
 import Foundation
 import Markdown
 
-struct MarkdownParser {
-    func parse(_ source: String) -> MarkdownDocument {
-        let doc = Document(parsing: source)
-        var visitor = BlockVisitor(source: source)
-        visitor.visit(doc)
-        return MarkdownDocument(source: source, blocks: visitor.blocks)
+final class MarkdownParser {
+    private struct SourceLine {
+        let index: Int
+        let range: NSRange
+        let text: String
     }
-}
 
-// MARK: - SourceRange → NSRange
+    private struct ReuseFingerprint: Hashable {
+        let textHash: UInt64
+        let stateHash: UInt64
+        let incomingState: ParserState
+        let outgoingState: ParserState
+    }
 
-/// Pre-computes a UTF-8 line-start table so each `SourceLocation`
-/// (1-based line, 1-based UTF-8-byte column) can be converted to a
-/// UTF-16 `NSRange` offset in O(1).
-///
-/// Conversion chain:
-///   line + column → absolute UTF-8 byte position
-///                 → `String.Index`  (encoding-agnostic)
-///                 → UTF-16 offset   (for `NSRange`)
-///
-/// This is always safe: UTF-8 byte boundaries align with Unicode scalar
-/// boundaries, which also align with UTF-16 boundaries (a 4-byte UTF-8
-/// sequence is a surrogate pair in UTF-16 — both are indivisible).
-/// Therefore `samePosition(in: utf16)` never returns `nil` for any valid
-/// swift-markdown column value.
-private struct RangeConverter {
-    let source: String
-    let ns: NSString
-    // utf8ByteOffset[i] = byte offset of line (i+1) start; 0-indexed
-    private let lineStarts: [Int]
+    private let headingRegex = try! NSRegularExpression(pattern: "^(\\s{0,3})(#{1,6})(?:\\s+|$)(.*)$")
+    private let checklistRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[( |x|X)\\]\\s*)(.*)$")
+    private let unorderedListRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+)(.*)$")
+    private let orderedListRegex = try! NSRegularExpression(pattern: "^(\\s*)(\\d+)\\.\\s+(.*)$")
+    private let blockquoteRegex = try! NSRegularExpression(pattern: "^(\\s*>\\s?)(.*)$")
+    private let imageRegex = try! NSRegularExpression(pattern: "^!\\[([^\\]]*)\\]\\(([^\\)]+)\\)$")
+    private let fenceRegex = try! NSRegularExpression(pattern: "^(\\s*)(```|~~~).*$")
 
-    init(source: String) {
-        self.source = source
-        self.ns = source as NSString
-        var starts = [0]
-        var offset = 0
-        for byte in source.utf8 {
-            offset += 1
-            if byte == 10 { starts.append(offset) }   // '\n'
+    private let codeInlineRegex = try! NSRegularExpression(pattern: "(`+)([^`\\n]+?)(\\1)")
+    private let highlightRegex = try! NSRegularExpression(pattern: "(==)(?=\\S)(.+?)(?<=\\S)(==)")
+    private let strikeRegex = try! NSRegularExpression(pattern: "(~~)(?=\\S)(.+?)(?<=\\S)(~~)")
+    private let boldAsteriskRegex = try! NSRegularExpression(pattern: "(\\*\\*)(?=\\S)(.+?)(?<=\\S)(\\*\\*)")
+    private let boldUnderscoreRegex = try! NSRegularExpression(pattern: "(__)(?=\\S)(.+?)(?<=\\S)(__)")
+    private let italicAsteriskRegex = try! NSRegularExpression(pattern: "(?<!\\*)(\\*)(?=\\S)(.+?)(?<=\\S)(\\*)(?!\\*)")
+    private let italicUnderscoreRegex = try! NSRegularExpression(pattern: "(?<!_)(_)(?=\\S)(.+?)(?<=\\S)(_)(?!_)")
+
+    func reparseAll(source: String, state: MarkdownDocumentState) -> MarkdownDocument {
+        reconcile(source: source, editedRange: NSRange(location: 0, length: state.totalLength), changeInLength: (source as NSString).length - state.totalLength, state: state, forceFull: true)
+    }
+
+    func update(source: String, editedRange: NSRange, changeInLength delta: Int, state: MarkdownDocumentState) -> MarkdownDocument {
+        reconcile(source: source, editedRange: editedRange, changeInLength: delta, state: state, forceFull: state.lines.isEmpty)
+    }
+
+    func syncTextOnly(source: String, state: MarkdownDocumentState) {
+        let lines = buildLines(from: source)
+        state.lines = lines.enumerated().map { index, line in
+            LineState(
+                lineIndex: index,
+                lineRange: line.range,
+                textHash: hashText(line.text),
+                stateHash: 0,
+                incomingState: .normal,
+                outgoingState: .normal,
+                blocks: [],
+                containsUnresolvedSyntax: true
+            )
         }
-        lineStarts = starts
+        state.totalLength = (source as NSString).length
     }
 
-    func utf16Offset(line: Int, column: Int) -> Int? {
-        let li = line - 1
-        guard li >= 0, li < lineStarts.count, column >= 1 else { return nil }
-        let utf8Pos = lineStarts[li] + (column - 1)
-        let utf8 = source.utf8
-        guard utf8Pos <= utf8.count else { return nil }
-        let idx = utf8.index(utf8.startIndex, offsetBy: utf8Pos)
-        let utf16 = source.utf16
-        guard let u16 = idx.samePosition(in: utf16) else { return nil }
-        return utf16.distance(from: utf16.startIndex, to: u16)
+    private func reconcile(
+        source: String,
+        editedRange: NSRange,
+        changeInLength delta: Int,
+        state: MarkdownDocumentState,
+        forceFull: Bool
+    ) -> MarkdownDocument {
+        let newLines = buildLines(from: source)
+        let oldLines = state.lines
+        let startLine = forceFull ? 0 : lineIndex(for: editedRange.location, in: oldLines)
+        let shiftedOldLines = shiftOldLines(oldLines, from: startLine, delta: delta)
+        let reuseMap = buildReuseMap(from: shiftedOldLines, startingAt: startLine)
+
+        var reconciled: [LineState] = forceFull ? [] : Array(oldLines.prefix(startLine))
+        var reparsedRange: NSRange?
+        var lineIndexCursor = startLine
+        var shortCircuited = false
+
+        while lineIndexCursor < newLines.count {
+            let incomingState = reconciled.last?.outgoingState ?? .normal
+            let parsedLine = parseLine(newLines[lineIndexCursor], incomingState: incomingState)
+            reconciled.append(parsedLine)
+            reparsedRange = union(reparsedRange, parsedLine.lineRange)
+
+            if let suffixAnchor = reusableSuffixAnchor(
+                for: parsedLine,
+                newLineIndex: lineIndexCursor,
+                allNewLines: newLines,
+                shiftedOldLines: shiftedOldLines,
+                reuseMap: reuseMap,
+                minimumOldIndex: startLine
+            ) {
+                let suffixStart = suffixAnchor + 1
+                if suffixStart < shiftedOldLines.count {
+                    for oldLine in shiftedOldLines[suffixStart...] {
+                        reconciled.append(oldLine.shifted(by: 0, lineIndex: reconciled.count))
+                    }
+                }
+                shortCircuited = true
+                break
+            }
+
+            lineIndexCursor += 1
+        }
+
+        if !shortCircuited, reconciled.count < newLines.count {
+            let remainingStart = reconciled.count
+            for index in remainingStart..<newLines.count {
+                let incomingState = reconciled.last?.outgoingState ?? .normal
+                let parsedLine = parseLine(newLines[index], incomingState: incomingState)
+                reconciled.append(parsedLine)
+                reparsedRange = union(reparsedRange, parsedLine.lineRange)
+            }
+        }
+
+        if reconciled.count != newLines.count {
+            reconciled = reconciled.prefix(newLines.count).enumerated().map { index, line in
+                line.shifted(by: 0, lineIndex: index)
+            }
+        }
+
+        state.lines = reconciled.enumerated().map { index, line in
+            line.shifted(by: 0, lineIndex: index)
+        }
+        state.totalLength = (source as NSString).length
+        state.revision += 1
+
+        return state.makeDocument(source: source, affectedRange: reparsedRange)
     }
 
-    func nsRange(for range: SourceRange) -> NSRange? {
-        guard
-            let lo = utf16Offset(line: range.lowerBound.line, column: range.lowerBound.column),
-            let hi = utf16Offset(line: range.upperBound.line, column: range.upperBound.column),
-            lo <= hi, hi <= ns.length
-        else { return nil }
-        return NSRange(location: lo, length: hi - lo)
+    private func buildLines(from source: String) -> [SourceLine] {
+        let ns = source as NSString
+        guard ns.length > 0 else { return [] }
+
+        var lines: [SourceLine] = []
+        var cursor = 0
+        var index = 0
+
+        while cursor < ns.length {
+            let rawRange = ns.lineRange(for: NSRange(location: cursor, length: 0))
+            let trimmedRange = trimmingNewline(rawRange, in: ns)
+            lines.append(SourceLine(index: index, range: trimmedRange, text: ns.substring(with: trimmedRange)))
+            cursor = NSMaxRange(rawRange)
+            index += 1
+        }
+
+        return lines
     }
 
-    /// Strips a trailing `\n` (and optional `\r`) from an `NSRange`.
-    func trimmingNewline(_ r: NSRange) -> NSRange {
-        var end = NSMaxRange(r)
-        guard end > r.location, end <= ns.length else { return r }
+    private func lineIndex(for location: Int, in lines: [LineState]) -> Int {
+        guard !lines.isEmpty else { return 0 }
+
+        var lower = 0
+        var upper = lines.count - 1
+
+        while lower <= upper {
+            let mid = (lower + upper) / 2
+            let line = lines[mid].lineRange
+            let end = NSMaxRange(line)
+
+            if location < line.location {
+                upper = mid - 1
+            } else if location > end {
+                lower = mid + 1
+            } else {
+                return mid
+            }
+        }
+
+        return min(max(lower, 0), lines.count - 1)
+    }
+
+    private func shiftOldLines(_ lines: [LineState], from startLine: Int, delta: Int) -> [LineState] {
+        guard delta != 0, startLine < lines.count else { return lines }
+
+        var shifted = lines
+        for index in startLine..<shifted.count {
+            shifted[index] = shifted[index].shifted(by: delta)
+        }
+        return shifted
+    }
+
+    private func buildReuseMap(from lines: [LineState], startingAt startLine: Int) -> [ReuseFingerprint: [Int]] {
+        var lookup: [ReuseFingerprint: [Int]] = [:]
+        guard startLine < lines.count else { return lookup }
+
+        for index in startLine..<lines.count {
+            let line = lines[index]
+            guard !line.containsUnresolvedSyntax else { continue }
+            let fingerprint = ReuseFingerprint(
+                textHash: line.textHash,
+                stateHash: line.stateHash,
+                incomingState: line.incomingState,
+                outgoingState: line.outgoingState
+            )
+            lookup[fingerprint, default: []].append(index)
+        }
+
+        return lookup
+    }
+
+    private func reusableSuffixAnchor(
+        for line: LineState,
+        newLineIndex: Int,
+        allNewLines: [SourceLine],
+        shiftedOldLines: [LineState],
+        reuseMap: [ReuseFingerprint: [Int]],
+        minimumOldIndex: Int
+    ) -> Int? {
+        guard !line.containsUnresolvedSyntax else { return nil }
+
+        let fingerprint = ReuseFingerprint(
+            textHash: line.textHash,
+            stateHash: line.stateHash,
+            incomingState: line.incomingState,
+            outgoingState: line.outgoingState
+        )
+
+        guard let candidates = reuseMap[fingerprint] else { return nil }
+
+        for candidate in candidates where candidate >= minimumOldIndex {
+            guard candidate < shiftedOldLines.count else { continue }
+            guard shiftedOldLines[candidate].lineRange == line.lineRange else { continue }
+
+            let remainingNew = allNewLines.count - (newLineIndex + 1)
+            let remainingOld = shiftedOldLines.count - (candidate + 1)
+            guard remainingNew == remainingOld else { continue }
+
+            if newLineIndex + 1 < allNewLines.count, candidate + 1 < shiftedOldLines.count {
+                let nextTextHash = hashText(allNewLines[newLineIndex + 1].text)
+                guard nextTextHash == shiftedOldLines[candidate + 1].textHash else { continue }
+            }
+
+            return candidate
+        }
+
+        return nil
+    }
+
+    private func parseLine(_ line: SourceLine, incomingState: ParserState) -> LineState {
+        let textHash = hashText(line.text)
+        let nsText = line.text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        let trimmed = line.text.trimmingCharacters(in: .whitespaces)
+
+        if case .inCodeBlock = incomingState {
+            let closesFence = fenceRegex.firstMatch(in: line.text, range: fullRange) != nil
+            let block = makeBlock(kind: .codeBlock, line: line, markerRange: nil, contentRange: line.range, inlines: [])
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: closesFence ? .normal : .inCodeBlock,
+                blocks: [block],
+                textHash: textHash,
+                containsUnresolvedSyntax: false
+            )
+        }
+
+        if trimmed.isEmpty {
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: .normal,
+                blocks: [],
+                textHash: textHash,
+                containsUnresolvedSyntax: false
+            )
+        }
+
+        if fenceRegex.firstMatch(in: line.text, range: fullRange) != nil {
+            let block = makeBlock(kind: .codeBlock, line: line, markerRange: nil, contentRange: line.range, inlines: [])
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: .inCodeBlock,
+                blocks: [block],
+                textHash: textHash,
+                containsUnresolvedSyntax: false
+            )
+        }
+
+        if let match = headingRegex.firstMatch(in: line.text, range: fullRange) {
+            let markerLocal = match.range(at: 2)
+            let contentLocal = match.range(at: 3)
+            let block = makeBlock(
+                kind: .heading(level: markerLocal.length),
+                line: line,
+                markerRange: absoluteRange(markerLocal, base: line.range.location),
+                contentRange: contentLocal.length > 0 ? absoluteRange(contentLocal, base: line.range.location) : nil,
+                inlines: []
+            )
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: .normal,
+                blocks: [block],
+                textHash: textHash,
+                containsUnresolvedSyntax: false
+            )
+        }
+
+        if let match = checklistRegex.firstMatch(in: line.text, range: fullRange) {
+            let markerLocal = match.range(at: 1)
+            let markerValue = match.range(at: 2)
+            let contentLocal = match.range(at: 3)
+            let markerChar = markerValue.location != NSNotFound ? nsText.substring(with: markerValue) : " "
+            let checklistMarker: ChecklistMarker = markerChar.lowercased() == "x" ? .checked : .unchecked
+            let contentRange = absoluteRange(contentLocal, base: line.range.location)
+            let contentText = nsText.substring(with: contentLocal)
+            let block = makeBlock(
+                kind: .checklist(marker: checklistMarker),
+                line: line,
+                markerRange: absoluteRange(markerLocal, base: line.range.location),
+                contentRange: contentRange,
+                inlines: parseInlines(in: contentText, baseOffset: contentRange.location)
+            )
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: .inList(indent: leadingIndent(in: line.text)),
+                blocks: [block],
+                textHash: textHash,
+                containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
+            )
+        }
+
+        if let match = blockquoteRegex.firstMatch(in: line.text, range: fullRange) {
+            let markerLocal = match.range(at: 1)
+            let contentLocal = match.range(at: 2)
+            let contentRange = absoluteRange(contentLocal, base: line.range.location)
+            let contentText = nsText.substring(with: contentLocal)
+            let block = makeBlock(
+                kind: .blockquote,
+                line: line,
+                markerRange: absoluteRange(markerLocal, base: line.range.location),
+                contentRange: contentRange,
+                inlines: parseInlines(in: contentText, baseOffset: contentRange.location)
+            )
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: .inBlockquote,
+                blocks: [block],
+                textHash: textHash,
+                containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
+            )
+        }
+
+        if let match = orderedListRegex.firstMatch(in: line.text, range: fullRange) {
+            let leading = match.range(at: 1)
+            let digits = match.range(at: 2)
+            let contentLocal = match.range(at: 3)
+            let index = Int(nsText.substring(with: digits)) ?? 1
+            let markerLocal = NSRange(location: 0, length: contentLocal.location)
+            let contentRange = absoluteRange(contentLocal, base: line.range.location)
+            let contentText = nsText.substring(with: contentLocal)
+            let block = makeBlock(
+                kind: .orderedList(index: index),
+                line: line,
+                markerRange: absoluteRange(markerLocal, base: line.range.location),
+                contentRange: contentRange,
+                inlines: parseInlines(in: contentText, baseOffset: contentRange.location)
+            )
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: .inList(indent: leading.length),
+                blocks: [block],
+                textHash: textHash,
+                containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
+            )
+        }
+
+        if let match = unorderedListRegex.firstMatch(in: line.text, range: fullRange) {
+            let markerLocal = match.range(at: 1)
+            let contentLocal = match.range(at: 2)
+            let contentRange = absoluteRange(contentLocal, base: line.range.location)
+            let contentText = nsText.substring(with: contentLocal)
+            let block = makeBlock(
+                kind: .bulletList,
+                line: line,
+                markerRange: absoluteRange(markerLocal, base: line.range.location),
+                contentRange: contentRange,
+                inlines: parseInlines(in: contentText, baseOffset: contentRange.location)
+            )
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: .inList(indent: leadingIndent(in: line.text)),
+                blocks: [block],
+                textHash: textHash,
+                containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
+            )
+        }
+
+        if let match = imageRegex.firstMatch(in: line.text, range: fullRange) {
+            let alt = nsText.substring(with: match.range(at: 1))
+            let path = nsText.substring(with: match.range(at: 2))
+            let block = makeBlock(
+                kind: .image(alt: alt, path: path),
+                line: line,
+                markerRange: nil,
+                contentRange: line.range,
+                inlines: []
+            )
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: .normal,
+                blocks: [block],
+                textHash: textHash,
+                containsUnresolvedSyntax: false
+            )
+        }
+
+        if case let .inList(indent) = incomingState,
+           leadingIndent(in: line.text) > indent {
+            let block = makeBlock(
+                kind: .paragraph,
+                line: line,
+                markerRange: nil,
+                contentRange: line.range,
+                inlines: parseInlines(in: line.text, baseOffset: line.range.location)
+            )
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: .inList(indent: indent),
+                blocks: [block],
+                textHash: textHash,
+                containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: line.text)
+            )
+        }
+
+        let block = makeBlock(
+            kind: .paragraph,
+            line: line,
+            markerRange: nil,
+            contentRange: line.range,
+            inlines: parseInlines(in: line.text, baseOffset: line.range.location)
+        )
+        return makeLineState(
+            line: line,
+            incomingState: incomingState,
+            outgoingState: .normal,
+            blocks: [block],
+            textHash: textHash,
+            containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: line.text)
+        )
+    }
+
+    private func makeLineState(
+        line: SourceLine,
+        incomingState: ParserState,
+        outgoingState: ParserState,
+        blocks: [MarkdownBlock],
+        textHash: UInt64,
+        containsUnresolvedSyntax: Bool
+    ) -> LineState {
+        let stateHash = MarkdownStableHash.hash(
+            [incomingState.stableKey, outgoingState.stableKey, String(textHash), containsUnresolvedSyntax ? "1" : "0"]
+                + blocks.map { String($0.id) }
+        )
+
+        return LineState(
+            lineIndex: line.index,
+            lineRange: line.range,
+            textHash: textHash,
+            stateHash: stateHash,
+            incomingState: incomingState,
+            outgoingState: outgoingState,
+            blocks: blocks,
+            containsUnresolvedSyntax: containsUnresolvedSyntax
+        )
+    }
+
+    private func makeBlock(
+        kind: MarkdownBlock.Kind,
+        line: SourceLine,
+        markerRange: NSRange?,
+        contentRange: NSRange?,
+        inlines: [MarkdownInline]
+    ) -> MarkdownBlock {
+        let identity = MarkdownStableHash.hash([
+            kind.stableKey,
+            line.text,
+            markerRange.map { relativeDescription(for: $0, base: line.range.location) } ?? "-",
+            contentRange.map { relativeDescription(for: $0, base: line.range.location) } ?? "-"
+        ] + inlines.map { inlineIdentity($0, base: line.range.location) })
+
+        return MarkdownBlock(
+            id: identity,
+            kind: kind,
+            markerRange: markerRange,
+            contentRange: contentRange,
+            lineRange: line.range,
+            inlines: inlines
+        )
+    }
+
+    private func parseInlines(in text: String, baseOffset: Int) -> [MarkdownInline] {
+        var inlines: [MarkdownInline] = []
+        appendMatches(from: codeInlineRegex, in: text, baseOffset: baseOffset, kind: .code, into: &inlines)
+        appendMatches(from: highlightRegex, in: text, baseOffset: baseOffset, kind: .highlight, into: &inlines)
+        appendMatches(from: strikeRegex, in: text, baseOffset: baseOffset, kind: .strike, into: &inlines)
+        appendMatches(from: boldAsteriskRegex, in: text, baseOffset: baseOffset, kind: .bold, into: &inlines)
+        appendMatches(from: boldUnderscoreRegex, in: text, baseOffset: baseOffset, kind: .bold, into: &inlines)
+        appendMatches(from: italicAsteriskRegex, in: text, baseOffset: baseOffset, kind: .italic, into: &inlines)
+        appendMatches(from: italicUnderscoreRegex, in: text, baseOffset: baseOffset, kind: .italic, into: &inlines)
+
+        return inlines.sorted {
+            if $0.textRange.location == $1.textRange.location {
+                return $0.textRange.length < $1.textRange.length
+            }
+            return $0.textRange.location < $1.textRange.location
+        }
+    }
+
+    private func appendMatches(
+        from regex: NSRegularExpression,
+        in text: String,
+        baseOffset: Int,
+        kind: MarkdownInline.Kind,
+        into inlines: inout [MarkdownInline]
+    ) {
+        let nsText = text as NSString
+        let range = NSRange(location: 0, length: nsText.length)
+        for match in regex.matches(in: text, range: range) {
+            guard match.numberOfRanges >= 4 else { continue }
+            let open = absoluteRange(match.range(at: 1), base: baseOffset)
+            let body = absoluteRange(match.range(at: 2), base: baseOffset)
+            let close = absoluteRange(match.range(at: 3), base: baseOffset)
+            inlines.append(MarkdownInline(kind: kind, markerOpen: open, textRange: body, markerClose: close))
+        }
+    }
+
+    private func containsUnresolvedInlineSyntax(in text: String) -> Bool {
+        var scalarIndex = text.startIndex
+        var singleAsterisk = 0
+        var singleUnderscore = 0
+        var doubleAsterisk = 0
+        var doubleUnderscore = 0
+        var doubleTilde = 0
+        var doubleEquals = 0
+        var backticks = 0
+
+        while scalarIndex < text.endIndex {
+            let current = text[scalarIndex]
+            let nextIndex = text.index(after: scalarIndex)
+
+            if current == "\\" {
+                scalarIndex = nextIndex < text.endIndex ? text.index(after: nextIndex) : nextIndex
+                continue
+            }
+
+            if nextIndex < text.endIndex {
+                let pair = String(text[scalarIndex...nextIndex])
+                switch pair {
+                case "**":
+                    doubleAsterisk.toggleBit()
+                    scalarIndex = text.index(after: nextIndex)
+                    continue
+                case "__":
+                    doubleUnderscore.toggleBit()
+                    scalarIndex = text.index(after: nextIndex)
+                    continue
+                case "~~":
+                    doubleTilde.toggleBit()
+                    scalarIndex = text.index(after: nextIndex)
+                    continue
+                case "==":
+                    doubleEquals.toggleBit()
+                    scalarIndex = text.index(after: nextIndex)
+                    continue
+                default:
+                    break
+                }
+            }
+
+            switch current {
+            case "*":
+                singleAsterisk.toggleBit()
+            case "_":
+                singleUnderscore.toggleBit()
+            case "`":
+                backticks.toggleBit()
+            default:
+                break
+            }
+
+            scalarIndex = nextIndex
+        }
+
+        return singleAsterisk != 0 || singleUnderscore != 0 || doubleAsterisk != 0 || doubleUnderscore != 0 || doubleTilde != 0 || doubleEquals != 0 || backticks != 0
+    }
+
+    private func absoluteRange(_ range: NSRange, base: Int) -> NSRange {
+        NSRange(location: base + range.location, length: range.length)
+    }
+
+    private func relativeDescription(for range: NSRange, base: Int) -> String {
+        "\(range.location - base):\(range.length)"
+    }
+
+    private func inlineIdentity(_ inline: MarkdownInline, base: Int) -> String {
+        [
+            inline.kind.rawValue,
+            relativeDescription(for: inline.markerOpen, base: base),
+            relativeDescription(for: inline.textRange, base: base),
+            relativeDescription(for: inline.markerClose, base: base)
+        ].joined(separator: "|")
+    }
+
+    private func hashText(_ text: String) -> UInt64 {
+        MarkdownStableHash.hash(text)
+    }
+
+    private func leadingIndent(in text: String) -> Int {
+        text.prefix { $0 == " " || $0 == "\t" }.count
+    }
+
+    private func trimmingNewline(_ range: NSRange, in ns: NSString) -> NSRange {
+        var end = NSMaxRange(range)
+        guard end > range.location, end <= ns.length else { return range }
+
         if ns.character(at: end - 1) == 10 {
             end -= 1
-            if end > r.location, ns.character(at: end - 1) == 13 { end -= 1 }
+            if end > range.location, ns.character(at: end - 1) == 13 {
+                end -= 1
+            }
         }
-        return NSRange(location: r.location, length: max(0, end - r.location))
+
+        return NSRange(location: range.location, length: max(0, end - range.location))
+    }
+
+    private func union(_ lhs: NSRange?, _ rhs: NSRange) -> NSRange {
+        lhs.map { NSUnionRange($0, rhs) } ?? rhs
     }
 }
 
-// MARK: - Block Visitor
-
-private struct BlockVisitor: MarkupVisitor {
-    typealias Result = Void
-
-    let conv: RangeConverter
-    var blocks: [MarkdownBlock] = []
-
-    init(source: String) { conv = RangeConverter(source: source) }
-
-    mutating func defaultVisit(_ markup: Markup) {}
-
-    mutating func visitDocument(_ document: Document) {
-        for child in document.children { visit(child) }
+private extension Int {
+    mutating func toggleBit() {
+        self = self == 0 ? 1 : 0
     }
-
-    // MARK: Heading
-
-    mutating func visitHeading(_ heading: Heading) {
-        guard let raw = heading.range, let r = conv.nsRange(for: raw) else { return }
-        let lineRange = conv.trimmingNewline(r)
-        let level = heading.level
-        let markerRange = NSRange(location: lineRange.location,
-                                  length: min(level, lineRange.length))
-        // Skip '#' chars and any following whitespace to locate content
-        let ns = conv.ns
-        var cs = lineRange.location + level
-        while cs < NSMaxRange(lineRange) {
-            let c = ns.character(at: cs)
-            guard c == 32 || c == 9 else { break }
-            cs += 1
-        }
-        let contentRange = NSRange(location: cs, length: max(0, NSMaxRange(lineRange) - cs))
-        blocks.append(.heading(level: level, markerRange: markerRange,
-                               contentRange: contentRange, lineRange: lineRange))
-    }
-
-    // MARK: Paragraph
-
-    mutating func visitParagraph(_ paragraph: Paragraph) {
-        guard let raw = paragraph.range, let r = conv.nsRange(for: raw) else { return }
-        let lineRange = conv.trimmingNewline(r)
-        // A paragraph containing only an Image becomes a block-level image
-        let children = Array(paragraph.children)
-        if children.count == 1, let img = children[0] as? Image {
-            blocks.append(.image(alt: img.plainText, path: img.source ?? "", lineRange: lineRange))
-            return
-        }
-        blocks.append(.paragraph(lineRange: lineRange, inlines: inlinePass(paragraph)))
-    }
-
-    // MARK: Lists
-
-    mutating func visitUnorderedList(_ list: UnorderedList) {
-        for child in list.children {
-            guard let item = child as? ListItem else { continue }
-            processUnorderedItem(item)
-        }
-    }
-
-    mutating func visitOrderedList(_ list: OrderedList) {
-        var idx = Int(list.startIndex)
-        for child in list.children {
-            guard let item = child as? ListItem else { continue }
-            processOrderedItem(item, index: idx)
-            idx += 1
-        }
-    }
-
-    // List items are handled exclusively by the parent list visitors above.
-    mutating func visitListItem(_ listItem: ListItem) {}
-
-    private mutating func processUnorderedItem(_ item: ListItem) {
-        guard let raw = item.range, let r = conv.nsRange(for: raw) else { return }
-        let lineRange = conv.trimmingNewline(r)
-        let para = item.children.compactMap { $0 as? Paragraph }.first
-        let contentRange = para
-            .flatMap { $0.range.flatMap { conv.nsRange(for: $0) } }
-            .map { conv.trimmingNewline($0) } ?? lineRange
-        let inlines = para.map { inlinePass($0) } ?? []
-
-        if let checkbox = item.checkbox {
-            let markerLen = max(0, contentRange.location - lineRange.location)
-            blocks.append(.checklist(
-                marker: checkbox == .checked ? .checked : .unchecked,
-                markerRange: NSRange(location: lineRange.location, length: markerLen),
-                contentRange: contentRange, lineRange: lineRange, inlines: inlines))
-        } else {
-            // Locate the bullet character (-, *, +), skipping any leading spaces
-            let ns = conv.ns
-            var mLoc = lineRange.location
-            while mLoc < NSMaxRange(lineRange), ns.character(at: mLoc) == 32 { mLoc += 1 }
-            let markerRange = NSRange(location: mLoc,
-                                      length: mLoc < NSMaxRange(lineRange) ? 1 : 0)
-            blocks.append(.bulletList(markerRange: markerRange, contentRange: contentRange,
-                                      lineRange: lineRange, inlines: inlines))
-        }
-    }
-
-    private mutating func processOrderedItem(_ item: ListItem, index: Int) {
-        guard let raw = item.range, let r = conv.nsRange(for: raw) else { return }
-        let lineRange = conv.trimmingNewline(r)
-        let para = item.children.compactMap { $0 as? Paragraph }.first
-        let contentRange = para
-            .flatMap { $0.range.flatMap { conv.nsRange(for: $0) } }
-            .map { conv.trimmingNewline($0) } ?? lineRange
-        let inlines = para.map { inlinePass($0) } ?? []
-        // Marker covers "1." — everything before the space that precedes content text
-        let markerLen = max(0, contentRange.location - lineRange.location - 1)
-        let markerRange = NSRange(location: lineRange.location, length: markerLen)
-        blocks.append(.orderedList(index: index, markerRange: markerRange,
-                                   contentRange: contentRange, lineRange: lineRange, inlines: inlines))
-    }
-
-    // MARK: Blockquote
-
-    mutating func visitBlockQuote(_ blockQuote: BlockQuote) {
-        guard let raw = blockQuote.range, let r = conv.nsRange(for: raw) else { return }
-        let lineRange = conv.trimmingNewline(r)
-        let markerRange = NSRange(location: lineRange.location, length: 1)
-        let cs = min(lineRange.location + 2, NSMaxRange(lineRange))
-        let contentRange = NSRange(location: cs, length: max(0, NSMaxRange(lineRange) - cs))
-        var inlines: [MarkdownInline] = []
-        for child in blockQuote.children {
-            if let para = child as? Paragraph { inlines += inlinePass(para) }
-        }
-        blocks.append(.blockquote(markerRange: markerRange, contentRange: contentRange,
-                                  lineRange: lineRange, inlines: inlines))
-    }
-
-    // Non-mutating: creates a temporary InlineVisitor, never modifies self.
-    private func inlinePass(_ markup: Markup) -> [MarkdownInline] {
-        var v = InlineVisitor(conv: conv)
-        for child in markup.children { v.visit(child) }
-        return v.inlines
-    }
-}
-
-// MARK: - Inline Visitor
-
-private struct InlineVisitor: MarkupVisitor {
-    typealias Result = Void
-
-    let conv: RangeConverter
-    var inlines: [MarkdownInline] = []
-
-    mutating func defaultVisit(_ markup: Markup) {
-        for child in markup.children { visit(child) }
-    }
-
-    // Block-level handler covers standalone images; ignore inline images here.
-    mutating func visitImage(_ image: Image) {}
-
-    mutating func visitStrong(_ strong: Strong) {
-        if let i = markedInline(strong, width: 2, make: MarkdownInline.bold) { inlines.append(i) }
-        for child in strong.children { visit(child) }
-    }
-
-    mutating func visitEmphasis(_ emphasis: Emphasis) {
-        if let i = markedInline(emphasis, width: 1, make: MarkdownInline.italic) { inlines.append(i) }
-        for child in emphasis.children { visit(child) }
-    }
-
-    mutating func visitStrikethrough(_ strikethrough: Strikethrough) {
-        if let i = markedInline(strikethrough, width: 2, make: MarkdownInline.strike) { inlines.append(i) }
-        for child in strikethrough.children { visit(child) }
-    }
-
-    mutating func visitInlineCode(_ code: InlineCode) {
-        guard let raw = code.range, let full = conv.nsRange(for: raw), full.length >= 2 else { return }
-        // Detect actual backtick-run length to support ``code`` style spans.
-        let ns = conv.ns
-        var mLen = 0
-        while full.location + mLen < NSMaxRange(full),
-              ns.character(at: full.location + mLen) == 96 { mLen += 1 }  // '`'
-        guard mLen > 0, full.length >= mLen * 2 else { return }
-        inlines.append(.code(
-            markerOpen:  NSRange(location: full.location, length: mLen),
-            textRange:   NSRange(location: full.location + mLen, length: full.length - mLen * 2),
-            markerClose: NSRange(location: NSMaxRange(full) - mLen, length: mLen)))
-    }
-
-    // ==highlight== is not part of CommonMark or GFM; we detect it via a local
-    // regex scan on plain Text nodes, which swift-markdown leaves unparsed.
-    private static let highlightRx = try! NSRegularExpression(
-        pattern: #"(==)(?=\S)(.+?)(?<=\S)(==)"#)
-
-    mutating func visitText(_ text: Text) {
-        guard let raw = text.range, let nr = conv.nsRange(for: raw), nr.length > 0 else { return }
-        let str = conv.ns.substring(with: nr)
-        let local = NSRange(location: 0, length: (str as NSString).length)
-        for m in Self.highlightRx.matches(in: str, range: local) {
-            inlines.append(.highlight(
-                markerOpen:  m.range(at: 1).shifted(by: nr.location),
-                textRange:   m.range(at: 2).shifted(by: nr.location),
-                markerClose: m.range(at: 3).shifted(by: nr.location)))
-        }
-    }
-
-    private func markedInline(
-        _ node: Markup,
-        width: Int,
-        make: (NSRange, NSRange, NSRange) -> MarkdownInline
-    ) -> MarkdownInline? {
-        guard let raw = node.range, let full = conv.nsRange(for: raw),
-              full.length >= width * 2 else { return nil }
-        return make(
-            NSRange(location: full.location, length: width),
-            NSRange(location: full.location + width, length: full.length - width * 2),
-            NSRange(location: NSMaxRange(full) - width, length: width))
-    }
-}
-
-private extension NSRange {
-    func shifted(by n: Int) -> NSRange { NSRange(location: location + n, length: length) }
 }
