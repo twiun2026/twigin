@@ -33,7 +33,6 @@ struct MainSplitView: View {
                         selectedFolderId = folder.id
                         focusedColumn = .folderList
                     }
-                    .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
                     .padding(.vertical, 8)
                     .padding(.horizontal, 12)
                     .background(
@@ -41,11 +40,12 @@ struct MainSplitView: View {
                             if selectedFolderId == folder.id {
                                 let color = themeManager.currentTheme.bgSelected
                                 let targetColor = focusedColumn == .folderList ? color : color.opacity(0.5)
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
                                     .fill(targetColor)
                             }
                         }
                     )
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                     .listRowBackground(Color.clear)
                     .contextMenu {
                         if folder.folderId != "recently_deleted" {
@@ -108,7 +108,6 @@ struct MainSplitView: View {
                             selectedNoteId = note.id
                             focusedColumn = .noteList
                         }
-                        .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 12))
                         .padding(.vertical, 8)
                         .padding(.horizontal, 12)
                         .background(
@@ -116,11 +115,12 @@ struct MainSplitView: View {
                                 if selectedNoteId == note.id {
                                     let color = themeManager.currentTheme.bgSelected
                                     let targetColor = focusedColumn == .noteList ? color : color.opacity(0.5)
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
                                         .fill(targetColor)
                                 }
                             }
                         )
+                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                         .listRowBackground(Color.clear)
                         .contextMenu {
                             Button("New Note") {

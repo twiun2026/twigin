@@ -14,7 +14,7 @@ struct NoteEditorView: View {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                MacMarkdownTextView(
+                MarkdownEditorView(
                     text: $content,
                     theme: themeManager.currentTheme
                 )

@@ -68,7 +68,7 @@ final class MarkdownRenderer {
             .reduce(nil as NSRange?) { acc, r in acc.map { NSUnionRange($0, r) } ?? r }
         guard let u = union else { return nil }
         let hi = min(NSMaxRange(u), storageLen)
-        guard hi > u.location else { return nil }
+        guard hi >= u.location else { return nil }
         return NSRange(location: u.location, length: hi - u.location)
     }
 
