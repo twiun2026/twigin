@@ -41,6 +41,8 @@ struct MarkdownTextView: NSViewRepresentable {
         context.coordinator.lastRenderedFontName = fontName
         context.coordinator.lastRenderedLineSpacing = lineSpacing
         context.coordinator.refreshFull()
+        // Schedule a deferred refresh to ensure the initial rendering is complete
+        context.coordinator.scheduleDeferredRefresh()
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
@@ -56,8 +58,11 @@ struct MarkdownTextView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.parent = self
-
+        // Ensure the text storage delegate is set to the coordinator
         guard let textView = nsView.documentView as? MarkdownNativeTextView else { return }
+        if textView.textStorage?.delegate !== context.coordinator {
+            textView.textStorage?.delegate = context.coordinator
+        }
 
         textView.insertionPointColor = NSColor(theme.textMain)
         let newFont = resolvedFont()
@@ -74,7 +79,8 @@ struct MarkdownTextView: NSViewRepresentable {
             context.coordinator.lastRenderedTheme = theme
             context.coordinator.lastRenderedFontName = fontName
             context.coordinator.lastRenderedLineSpacing = lineSpacing
-            context.coordinator.refreshFull()
+            // Schedule a deferred refresh to ensure the rendering is complete after the text update
+            context.coordinator.scheduleDeferredRefresh()
         } else if context.coordinator.lastRenderedTheme != theme
                || context.coordinator.lastRenderedFontName != fontName
                || context.coordinator.lastRenderedLineSpacing != lineSpacing {
@@ -115,7 +121,9 @@ struct MarkdownTextView: NSViewRepresentable {
         var lastRenderedTheme: AppTheme? = nil
         var lastRenderedFontName: String = ""
         var lastRenderedLineSpacing: CGFloat = 0
-
+        private var pendingRefreshTask: DispatchWorkItem?
+        private var isRendering = false
+        
         private let parser = MarkdownParser()
         private let renderer = MarkdownRenderer()
         private let documentState = MarkdownDocumentState()
@@ -127,6 +135,19 @@ struct MarkdownTextView: NSViewRepresentable {
 
         func bind(textView: MarkdownNativeTextView) {
             self.textView = textView
+        }
+
+       func scheduleDeferredRefresh() {
+            pendingRefreshTask?.cancel()
+            let task = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+
+                self.isRendering = true
+                self.refreshFull()
+                self.isRendering = false // 渲染彻底结束，解锁
+            }
+            pendingRefreshTask = task
+            DispatchQueue.main.async(execute: task)
         }
 
         // MARK: NSTextStorageDelegate
@@ -151,8 +172,13 @@ struct MarkdownTextView: NSViewRepresentable {
         // MARK: NSTextViewDelegate
 
         func textDidChange(_ notification: Notification) {
-            guard let textView else { return }
-            parent.text = textView.string
+            // 如果是因为我们自己在 refreshFull 导致的文本属性变更，绝不回写给 SwiftUI！
+            guard let textView, !isRendering else { return } 
+            
+            // 只有当用户真正敲击键盘输入、引起字符不一致时，才同步给外部
+            if parent.text != textView.string {
+                parent.text = textView.string
+            }
 
             if textView.hasMarkedText() {
                 return
