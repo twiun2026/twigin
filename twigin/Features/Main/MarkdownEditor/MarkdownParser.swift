@@ -1,11 +1,12 @@
 import Foundation
 import Markdown
 
-final class MarkdownParser {
+nonisolated final class MarkdownParser {
     private struct SourceLine {
         let index: Int
-        let range: NSRange
+        let range: NSRange     // 行内容范围（不含换行符）
         let text: String
+        let fullLength: Int    // 推进长度（含换行符），用于树的前缀和
     }
 
     private struct ReuseFingerprint: Hashable {
@@ -50,15 +51,16 @@ final class MarkdownParser {
     }
 
     func update(source: String, editedRange: NSRange, changeInLength delta: Int, state: MarkdownDocumentState) -> MarkdownDocument {
-        reconcile(source: source, editedRange: editedRange, changeInLength: delta, state: state, forceFull: state.lines.isEmpty)
+        reconcile(source: source, editedRange: editedRange, changeInLength: delta, state: state, forceFull: state.lineStore.isEmpty)
     }
 
     func syncTextOnly(source: String, state: MarkdownDocumentState) {
         let lines = buildLines(from: source)
-        state.lines = lines.enumerated().map { index, line in
+        let relative = lines.map { line -> LineState in
             LineState(
-                lineIndex: index,
-                lineRange: line.range,
+                lineIndex: line.index,
+                lineRange: NSRange(location: 0, length: line.range.length),
+                fullLength: line.fullLength,
                 textHash: hashText(line.text),
                 stateHash: 0,
                 incomingState: .normal,
@@ -67,6 +69,7 @@ final class MarkdownParser {
                 containsUnresolvedSyntax: true
             )
         }
+        state.lineStore = LineStore(relativeLines: relative)
         state.totalLength = (source as NSString).length
     }
 
@@ -77,109 +80,132 @@ final class MarkdownParser {
         state: MarkdownDocumentState,
         forceFull: Bool
     ) -> MarkdownDocument {
-        let newLines = buildLines(from: source)
-        let oldLines = state.lines
-        let startLine = forceFull ? 0 : lineIndex(for: editedRange.location, in: oldLines)
-        let shiftedOldLines = shiftOldLines(oldLines, from: startLine, delta: delta)
-        let reuseMap = buildReuseMap(from: shiftedOldLines, startingAt: startLine)
+        let ns = source as NSString
+        let totalLength = ns.length
+        let oldStore = state.lineStore
+        let oldCount = oldStore.count
+        let startLine = forceFull ? 0 : min(oldStore.lineIndex(forOffset: editedRange.location), max(oldCount - 1, 0))
+        // 前缀 [0,startLine) 不变 → startLine 的字节起点新旧一致，直接取自旧树。
+        let startByte = (forceFull || startLine == 0 || oldStore.isEmpty) ? 0 : oldStore.base(ofLine: startLine)
 
-        var reconciled: [LineState] = forceFull ? [] : Array(oldLines.prefix(startLine))
+        // 新文档行数：仅从 startByte 起做一次“无分配”的行终止符扫描（O(尾部)）。
+        // 锚点的 remaining 校验必须基于真实文本行数——不能由复用点反推，否则失去正确性。
+        let newLineCount = startLine + countLines(from: startByte, in: ns)
+        let lineCountDelta = newLineCount - oldCount
+
+        // 旧行绝对几何访问器：等价于原 shiftOldLines（startLine 起整体右移 delta），
+        // 但按需单点计算 O(log N)，不再 O(N) 复制整条尾部。
+        func shiftedOldAbsolute(_ k: Int) -> LineState? {
+            guard k >= 0, k < oldCount else { return nil }
+            let extra = (k >= startLine) ? delta : 0
+            return oldStore.absoluteLine(at: k).shifted(by: extra)
+        }
+
+        // reuse 指纹与绝对位置无关（textHash/stateHash/incoming/outgoing），直接用相对旧行构建，无需 shift。
+        let reuseMap = buildReuseMap(oldStore: oldStore, startingAt: startLine)
+
+        // 懒惰增量分行：仅从 startByte 起按需切分 SourceLine（O(1)/行 + 极少子串分配），
+        // 不再对全文构建 SourceLine 数组，彻底消除原 buildLines 的 O(N) 分配开销。
+        var splitCursor = startByte
+        var splitIndex = startLine
+        func nextSourceLine() -> SourceLine? {
+            guard splitCursor < ns.length else { return nil }
+            let raw = ns.lineRange(for: NSRange(location: splitCursor, length: 0))
+            let trimmed = trimmingNewline(raw, in: ns)
+            let line = SourceLine(index: splitIndex, range: trimmed, text: ns.substring(with: trimmed), fullLength: raw.length)
+            splitCursor = NSMaxRange(raw)
+            splitIndex += 1
+            return line
+        }
+
+        var window: [LineState] = []                     // 新解析窗口（绝对几何）
         var reparsedRange: NSRange?
         var parsedWindow: ParsedLineWindow?
-        var lineIndexCursor = startLine
-        var shortCircuited = false
+        var suffixReuseOldIndex: Int?                    // 命中锚点后，复用旧后缀的起始旧行下标
 
-        while lineIndexCursor < newLines.count {
-            let incomingState = reconciled.last?.outgoingState ?? .normal
-            let parsedLine = parseLine(newLines[lineIndexCursor], incomingState: incomingState)
-            reconciled.append(parsedLine)
+        let prefixOutgoing: ParserState = (startLine > 0 && startLine - 1 < oldCount)
+            ? oldStore.line(at: startLine - 1).outgoingState
+            : .normal
+
+        var current = nextSourceLine()                   // startLine 行（保留一行前瞻用于锚点的“下一行”哈希校验）
+        while let sourceLine = current {
+            let cursor = sourceLine.index
+            let incomingState = window.last?.outgoingState ?? prefixOutgoing
+            let parsedLine = parseLine(sourceLine, incomingState: incomingState)
+            window.append(parsedLine)
             reparsedRange = union(reparsedRange, parsedLine.lineRange)
-            if var window = parsedWindow {
-                window.include(lineIndexCursor)
-                parsedWindow = window
+            if var w = parsedWindow {
+                w.include(cursor)
+                parsedWindow = w
             } else {
-                parsedWindow = ParsedLineWindow(lowerBound: lineIndexCursor, upperBound: lineIndexCursor)
+                parsedWindow = ParsedLineWindow(lowerBound: cursor, upperBound: cursor)
             }
 
-            if let stableAnchor = stablePropagationAnchor(
+            let lookahead = nextSourceLine()             // cursor+1 行（可能为 nil）
+
+            // 提前终止一：Stable Propagation Anchor（逻辑不变，比较仍为绝对几何）。
+            if let anchor = stablePropagationAnchor(
                 for: parsedLine,
-                newLineIndex: lineIndexCursor,
-                allNewLines: newLines,
-                shiftedOldLines: shiftedOldLines
+                newLineIndex: cursor,
+                nextLineText: lookahead?.text,
+                lineCountDelta: lineCountDelta,
+                oldStore: oldStore,
+                oldCount: oldCount,
+                shiftedOldAbsolute: shiftedOldAbsolute
             ) {
-                appendShiftedSuffix(from: stableAnchor, shiftedOldLines: shiftedOldLines, into: &reconciled)
-                shortCircuited = true
+                suffixReuseOldIndex = anchor + 1
                 break
             }
 
-            if let suffixAnchor = reusableSuffixAnchor(
+            // 提前终止二：Reusable Suffix Anchor（逻辑不变）。
+            if let candidate = reusableSuffixAnchor(
                 for: parsedLine,
-                newLineIndex: lineIndexCursor,
-                allNewLines: newLines,
-                shiftedOldLines: shiftedOldLines,
+                newLineIndex: cursor,
+                nextLineText: lookahead?.text,
+                lineCountDelta: lineCountDelta,
+                oldStore: oldStore,
+                oldCount: oldCount,
                 reuseMap: reuseMap,
-                minimumOldIndex: startLine
+                minimumOldIndex: startLine,
+                shiftedOldAbsolute: shiftedOldAbsolute
             ) {
-                appendShiftedSuffix(from: suffixAnchor, shiftedOldLines: shiftedOldLines, into: &reconciled)
-                shortCircuited = true
+                suffixReuseOldIndex = candidate + 1
                 break
             }
 
-            lineIndexCursor += 1
+            current = lookahead
         }
 
-        if !shortCircuited, reconciled.count < newLines.count {
-            let remainingStart = reconciled.count
-            for index in remainingStart..<newLines.count {
-                let incomingState = reconciled.last?.outgoingState ?? .normal
-                let parsedLine = parseLine(newLines[index], incomingState: incomingState)
-                reconciled.append(parsedLine)
-                reparsedRange = union(reparsedRange, parsedLine.lineRange)
-                if var window = parsedWindow {
-                    window.include(index)
-                    parsedWindow = window
-                } else {
-                    parsedWindow = ParsedLineWindow(lowerBound: index, upperBound: index)
-                }
-            }
+        // === O(log N) 结构拼接：共享前缀子树 + 新窗口子树 + 共享后缀子树 ===
+        // 因叶子几何为相对坐标，后缀子树无需任何 shift 即可直接复用，绝对偏移由前缀和自动重算。
+        let prefixTree = forceFull ? LineStore.empty : oldStore.prefix(startLine)
+        let windowTree = LineStore(relativeLines: window.map { $0.madeRelative() })
+        let suffixTree: LineStore
+        if let s = suffixReuseOldIndex, s < oldCount {
+            suffixTree = oldStore.suffix(from: s)
+        } else {
+            suffixTree = .empty
         }
-
-        if reconciled.count != newLines.count {
-            reconciled = reconciled.prefix(newLines.count).enumerated().map { index, line in
-                line.shifted(by: 0, lineIndex: index)
-            }
-        }
-
-        let normalizedLines = reconciled.enumerated().map { index, line in
-            line.shifted(by: 0, lineIndex: index)
-        }
-        state.lines = normalizedLines
-        state.totalLength = (source as NSString).length
+        state.lineStore = prefixTree.concat(windowTree).concat(suffixTree)
+        state.totalLength = totalLength
         state.revision += 1
 
+        // 仅对改动窗口构建 blockDiff（按同下标比较，语义与原实现一致）。
         let blockDiff: MarkdownBlockDiff?
         if let parsedWindow {
-            let changedRange = parsedWindow.range
-            let diff = buildBlockDiff(
-                oldLines: shiftedOldLines,
-                newLines: normalizedLines,
-                changedLines: changedRange
-            )
-            blockDiff = diff.isEmpty ? nil : diff
+            var operations: [MarkdownBlockDiff.Operation] = []
+            for i in parsedWindow.range {
+                let oldBlocks = shiftedOldAbsolute(i)?.blocks ?? []
+                let windowOffset = i - startLine
+                let newBlocks = (windowOffset >= 0 && windowOffset < window.count) ? window[windowOffset].blocks : []
+                operations.append(contentsOf: diffBlocks(old: oldBlocks, new: newBlocks))
+            }
+            blockDiff = operations.isEmpty ? nil : MarkdownBlockDiff(operations: operations)
         } else {
             blockDiff = nil
         }
 
         return state.makeDocument(source: source, affectedRange: reparsedRange, blockDiff: blockDiff)
-    }
-
-    private func appendShiftedSuffix(from anchor: Int, shiftedOldLines: [LineState], into reconciled: inout [LineState]) {
-        let suffixStart = anchor + 1
-        guard suffixStart < shiftedOldLines.count else { return }
-
-        for oldLine in shiftedOldLines[suffixStart...] {
-            reconciled.append(oldLine.shifted(by: 0, lineIndex: reconciled.count))
-        }
     }
 
     private func buildLines(from source: String) -> [SourceLine] {
@@ -193,7 +219,7 @@ final class MarkdownParser {
         while cursor < ns.length {
             let rawRange = ns.lineRange(for: NSRange(location: cursor, length: 0))
             let trimmedRange = trimmingNewline(rawRange, in: ns)
-            lines.append(SourceLine(index: index, range: trimmedRange, text: ns.substring(with: trimmedRange)))
+            lines.append(SourceLine(index: index, range: trimmedRange, text: ns.substring(with: trimmedRange), fullLength: rawRange.length))
             cursor = NSMaxRange(rawRange)
             index += 1
         }
@@ -201,46 +227,24 @@ final class MarkdownParser {
         return lines
     }
 
-    private func lineIndex(for location: Int, in lines: [LineState]) -> Int {
-        guard !lines.isEmpty else { return 0 }
-
-        var lower = 0
-        var upper = lines.count - 1
-
-        while lower <= upper {
-            let mid = (lower + upper) / 2
-            let line = lines[mid].lineRange
-            let end = NSMaxRange(line)
-
-            if location < line.location {
-                upper = mid - 1
-            } else if location > end {
-                lower = mid + 1
-            } else {
-                return mid
-            }
+    // 从 startByte 起统计行数（与 buildLines 同语义：以 NSString.lineRange 断行），
+    // 只推进游标、不分配子串，故是廉价的 O(尾部) 扫描。
+    private func countLines(from startByte: Int, in ns: NSString) -> Int {
+        guard startByte < ns.length else { return 0 }
+        var cursor = startByte
+        var count = 0
+        while cursor < ns.length {
+            let raw = ns.lineRange(for: NSRange(location: cursor, length: 0))
+            count += 1
+            cursor = NSMaxRange(raw)
         }
-
-        return min(max(lower, 0), lines.count - 1)
+        return count
     }
 
-    private func shiftOldLines(_ lines: [LineState], from startLine: Int, delta: Int) -> [LineState] {
-        guard delta != 0, startLine < lines.count else { return lines }
-
-        var shifted = lines
-        for index in startLine..<shifted.count {
-            shifted[index] = shifted[index].shifted(by: delta)
-        }
-        return shifted
-    }
-
-    private func buildReuseMap(from lines: [LineState], startingAt startLine: Int) -> [ReuseFingerprint: [Int]] {
+    private func buildReuseMap(oldStore: LineStore, startingAt startLine: Int) -> [ReuseFingerprint: [Int]] {
         var lookup: [ReuseFingerprint: [Int]] = [:]
-        guard startLine < lines.count else { return lookup }
-
-        for index in startLine..<lines.count {
-            let line = lines[index]
-            guard !line.containsUnresolvedSyntax else { continue }
+        oldStore.forEachRelative(from: startLine) { index, line in
+            guard !line.containsUnresolvedSyntax else { return }
             let fingerprint = ReuseFingerprint(
                 textHash: line.textHash,
                 stateHash: line.stateHash,
@@ -249,17 +253,24 @@ final class MarkdownParser {
             )
             lookup[fingerprint, default: []].append(index)
         }
-
         return lookup
     }
 
+    // 锚点改为“流式”接口：不再依赖全量 allNewLines 数组。
+    // - remaining 校验用 lineCountDelta（= 新总行数 - 旧总行数）等价改写：
+    //     stable:  remainingNew == remainingOld  ⟺  lineCountDelta == 0
+    //     reuse:   remainingNew == remainingOld  ⟺  lineCountDelta == newLineIndex - candidate
+    // - “下一行文本哈希”校验用一行前瞻 nextLineText（nil 表示已是最后一行）。
     private func reusableSuffixAnchor(
         for line: LineState,
         newLineIndex: Int,
-        allNewLines: [SourceLine],
-        shiftedOldLines: [LineState],
+        nextLineText: String?,
+        lineCountDelta: Int,
+        oldStore: LineStore,
+        oldCount: Int,
         reuseMap: [ReuseFingerprint: [Int]],
-        minimumOldIndex: Int
+        minimumOldIndex: Int,
+        shiftedOldAbsolute: (Int) -> LineState?
     ) -> Int? {
         guard !line.containsUnresolvedSyntax else { return nil }
 
@@ -273,16 +284,13 @@ final class MarkdownParser {
         guard let candidates = reuseMap[fingerprint] else { return nil }
 
         for candidate in candidates where candidate >= minimumOldIndex {
-            guard candidate < shiftedOldLines.count else { continue }
-            guard shiftedOldLines[candidate].lineRange == line.lineRange else { continue }
+            guard candidate < oldCount, let candidateAbsolute = shiftedOldAbsolute(candidate) else { continue }
+            guard candidateAbsolute.lineRange == line.lineRange else { continue }
 
-            let remainingNew = allNewLines.count - (newLineIndex + 1)
-            let remainingOld = shiftedOldLines.count - (candidate + 1)
-            guard remainingNew == remainingOld else { continue }
+            guard lineCountDelta == newLineIndex - candidate else { continue }
 
-            if newLineIndex + 1 < allNewLines.count, candidate + 1 < shiftedOldLines.count {
-                let nextTextHash = hashText(allNewLines[newLineIndex + 1].text)
-                guard nextTextHash == shiftedOldLines[candidate + 1].textHash else { continue }
+            if let nextLineText, candidate + 1 < oldCount {
+                guard hashText(nextLineText) == oldStore.line(at: candidate + 1).textHash else { continue }
             }
 
             return candidate
@@ -294,41 +302,23 @@ final class MarkdownParser {
     private func stablePropagationAnchor(
         for line: LineState,
         newLineIndex: Int,
-        allNewLines: [SourceLine],
-        shiftedOldLines: [LineState]
+        nextLineText: String?,
+        lineCountDelta: Int,
+        oldStore: LineStore,
+        oldCount: Int,
+        shiftedOldAbsolute: (Int) -> LineState?
     ) -> Int? {
-        guard newLineIndex < shiftedOldLines.count else { return nil }
-
-        let previousLine = shiftedOldLines[newLineIndex]
+        guard newLineIndex < oldCount, let previousLine = shiftedOldAbsolute(newLineIndex) else { return nil }
         guard previousLine.lineRange == line.lineRange else { return nil }
         guard line.isPropagationStable(comparedTo: previousLine) else { return nil }
 
-        let remainingNew = allNewLines.count - (newLineIndex + 1)
-        let remainingOld = shiftedOldLines.count - (newLineIndex + 1)
-        guard remainingNew == remainingOld else { return nil }
+        guard lineCountDelta == 0 else { return nil }
 
-        if newLineIndex + 1 < allNewLines.count {
-            let nextTextHash = hashText(allNewLines[newLineIndex + 1].text)
-            guard nextTextHash == shiftedOldLines[newLineIndex + 1].textHash else { return nil }
+        if let nextLineText, newLineIndex + 1 < oldCount {
+            guard hashText(nextLineText) == oldStore.line(at: newLineIndex + 1).textHash else { return nil }
         }
 
         return newLineIndex
-    }
-
-    private func buildBlockDiff(
-        oldLines: [LineState],
-        newLines: [LineState],
-        changedLines: Range<Int>
-    ) -> MarkdownBlockDiff {
-        var operations: [MarkdownBlockDiff.Operation] = []
-
-        for lineIndex in changedLines {
-            let oldBlocks = lineIndex < oldLines.count ? oldLines[lineIndex].blocks : []
-            let newBlocks = lineIndex < newLines.count ? newLines[lineIndex].blocks : []
-            operations.append(contentsOf: diffBlocks(old: oldBlocks, new: newBlocks))
-        }
-
-        return MarkdownBlockDiff(operations: operations)
     }
 
     private func diffBlocks(old: [MarkdownBlock], new: [MarkdownBlock]) -> [MarkdownBlockDiff.Operation] {
@@ -369,9 +359,10 @@ final class MarkdownParser {
         let trimmed = line.text.trimmingCharacters(in: .whitespaces)
 
         if incomingState.isInCodeFence {
+            // 栏内行与闭栏行均属容器体（.containerBody）：与开栏行连成多行容器。
             let closesFence = fenceRegex.firstMatch(in: line.text, range: fullRange) != nil
             let outgoingState = closesFence ? incomingState.settingCodeFence(nil) : incomingState
-            let block = makeBlock(kind: .codeBlock, line: line, markerRange: nil, contentRange: line.range, inlines: [])
+            let block = makeBlock(kind: .codeBlock, line: line, markerRange: nil, contentRange: line.range, inlines: [], containerRole: .containerBody)
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
@@ -397,8 +388,9 @@ final class MarkdownParser {
         }
 
         if fenceRegex.firstMatch(in: line.text, range: fullRange) != nil {
+            // 开栏行：多行代码容器的起始（.containerStart），后续 containers 聚合以此切分。
             let fenceState = ParserState.CodeFenceState(fenceToken: fenceToken(in: line.text))
-            let block = makeBlock(kind: .codeBlock, line: line, markerRange: nil, contentRange: line.range, inlines: [])
+            let block = makeBlock(kind: .codeBlock, line: line, markerRange: nil, contentRange: line.range, inlines: [], containerRole: .containerStart)
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
@@ -601,6 +593,7 @@ final class MarkdownParser {
         return LineState(
             lineIndex: line.index,
             lineRange: line.range,
+            fullLength: line.fullLength,
             textHash: textHash,
             stateHash: stateHash,
             incomingState: incomingState,
@@ -615,10 +608,14 @@ final class MarkdownParser {
         line: SourceLine,
         markerRange: NSRange?,
         contentRange: NSRange?,
-        inlines: [MarkdownInline]
+        inlines: [MarkdownInline],
+        containerRole: ContainerRole = .none
     ) -> MarkdownBlock {
+        // containerRole 纳入 id 哈希：区分文本相同的开栏/闭栏行（均为 ``` + .codeBlock），
+        // 消除旧实现中开栏与闭栏 block.id 碰撞的问题。
         let identity = MarkdownStableHash.hash([
             kind.stableKey,
+            "role:\(containerRole)",
             line.text,
             markerRange.map { relativeDescription(for: $0, base: line.range.location) } ?? "-",
             contentRange.map { relativeDescription(for: $0, base: line.range.location) } ?? "-"
@@ -630,7 +627,8 @@ final class MarkdownParser {
             markerRange: markerRange,
             contentRange: contentRange,
             lineRange: line.range,
-            inlines: inlines
+            inlines: inlines,
+            containerRole: containerRole
         )
     }
 
@@ -806,7 +804,7 @@ final class MarkdownParser {
     }
 }
 
-private extension Int {
+private nonisolated extension Int {
     mutating func toggleBit() {
         self = self == 0 ? 1 : 0
     }

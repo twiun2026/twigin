@@ -11,7 +11,9 @@ struct MarkdownRenderContext {
 }
 
 final class MarkdownRenderer {
-    private var checkboxCache: [Int: CheckboxAttachment] = [:]
+    // 缓存 Key 使用 MarkdownBlock.id（由行内相对坐标 + 语义哈希生成），
+    // 不含绝对 location，前面行增删不会改变某个复选框的 Key，从根源消除错位/泄漏/闪烁。
+    private var checkboxCache: [UInt64: CheckboxAttachment] = [:]
 
     var bodyFontName: String = ""
     var lineSpacingMultiplier: CGFloat = 0
@@ -69,8 +71,22 @@ final class MarkdownRenderer {
 
         let renderPlan = makeRenderPlan(document: context.document, storageLength: storageLength)
         guard !renderPlan.ranges.isEmpty else { return }
-        let liveKeys = Set(context.document.blocks.compactMap(checkboxKey(for:)))
-        checkboxCache = checkboxCache.filter { liveKeys.contains($0.key) }
+
+        // 缓存清理：全量渲染时按存活块过滤；增量渲染仅移除本次删除/被改写的复选框块，
+        // 避免每次编辑都 O(N) 物化并扫描全部块。
+        if let diff = context.document.blockDiff, !diff.isEmpty {
+            for operation in diff.operations {
+                switch operation {
+                case let .delete(block), let .modify(old: block, new: _):
+                    if let key = checkboxKey(for: block) { checkboxCache.removeValue(forKey: key) }
+                case .insert:
+                    break
+                }
+            }
+        } else {
+            let liveKeys = Set(context.document.blocks.compactMap(checkboxKey(for:)))
+            checkboxCache = checkboxCache.filter { liveKeys.contains($0.key) }
+        }
 
         textStorage.beginEditing()
         for range in renderPlan.ranges {
@@ -182,9 +198,9 @@ final class MarkdownRenderer {
         return NSRange(location: lowerBound, length: upperBound - lowerBound)
     }
 
-    private func checkboxKey(for block: MarkdownBlock) -> Int? {
+    private func checkboxKey(for block: MarkdownBlock) -> UInt64? {
         guard case .checklist = block.kind else { return nil }
-        return block.lineRange.location
+        return block.id
     }
 
     private func applyBlock(_ block: MarkdownBlock, to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
@@ -200,7 +216,7 @@ final class MarkdownRenderer {
         case let .checklist(marker):
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyChecklist(marker: marker, markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, theme: theme, context: context)
+            applyChecklist(blockID: block.id, marker: marker, markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, theme: theme, context: context)
 
         case let .image(_, path):
             applyImageLine(path: path, lineRange: block.lineRange, to: attributed, theme: theme)
@@ -309,6 +325,7 @@ final class MarkdownRenderer {
     }
 
     private func applyChecklist(
+        blockID: UInt64,
         marker: ChecklistMarker,
         markerRange: NSRange,
         contentRange: NSRange,
@@ -328,10 +345,12 @@ final class MarkdownRenderer {
         ], range: markerTextRange)
 
         let isChecked = marker == .checked
-        let cacheKey = lineRange.location
+        let cacheKey = blockID
 
         let attachment: CheckboxAttachment
         if let cached = checkboxCache[cacheKey], cached.isChecked == isChecked {
+            // 命中：刷新回调与最新绝对行范围（id 稳定但 location 可能已偏移）。
+            cached.range = lineRange
             cached.onToggle = context.onToggleChecklist
             attachment = cached
         } else {

@@ -36,13 +36,10 @@ struct MarkdownTextView: NSViewRepresentable {
         context.coordinator.bind(textView: textView)
         textView.textStorage?.delegate = context.coordinator
 
-        textView.string = text
         context.coordinator.lastRenderedTheme = theme
         context.coordinator.lastRenderedFontName = fontName
         context.coordinator.lastRenderedLineSpacing = lineSpacing
-        context.coordinator.refreshFull()
-        // Schedule a deferred refresh to ensure the initial rendering is complete
-        context.coordinator.scheduleDeferredRefresh()
+        context.coordinator.setContent(text, on: textView)
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
@@ -58,11 +55,8 @@ struct MarkdownTextView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         context.coordinator.parent = self
-        // Ensure the text storage delegate is set to the coordinator
+
         guard let textView = nsView.documentView as? MarkdownNativeTextView else { return }
-        if textView.textStorage?.delegate !== context.coordinator {
-            textView.textStorage?.delegate = context.coordinator
-        }
 
         textView.insertionPointColor = NSColor(theme.textMain)
         let newFont = resolvedFont()
@@ -74,17 +68,25 @@ struct MarkdownTextView: NSViewRepresentable {
             nsView.backgroundColor = bgColor
         }
 
-        if textView.string != text {
-            textView.string = text
+        // suppressStringSync：本次 updateNSView 由自身编辑回写绑定触发，文本已同步，
+        // 跳过 textView.string != text 的 O(N) 比较（避免每次按键在主线程扫全文）。
+        if context.coordinator.suppressStringSync {
+            context.coordinator.suppressStringSync = false
+        } else if textView.string != text {
             context.coordinator.lastRenderedTheme = theme
             context.coordinator.lastRenderedFontName = fontName
             context.coordinator.lastRenderedLineSpacing = lineSpacing
-            // Schedule a deferred refresh to ensure the rendering is complete after the text update
-            context.coordinator.scheduleDeferredRefresh()
-        } else if context.coordinator.lastRenderedTheme != theme
-               || context.coordinator.lastRenderedFontName != fontName
-               || context.coordinator.lastRenderedLineSpacing != lineSpacing {
-            context.coordinator.refreshFull()
+            context.coordinator.setContent(text, on: textView)
+            return
+        }
+
+        if context.coordinator.lastRenderedTheme != theme
+           || context.coordinator.lastRenderedFontName != fontName
+           || context.coordinator.lastRenderedLineSpacing != lineSpacing {
+            context.coordinator.lastRenderedTheme = theme
+            context.coordinator.lastRenderedFontName = fontName
+            context.coordinator.lastRenderedLineSpacing = lineSpacing
+            context.coordinator.rerenderFull()
         }
     }
 
@@ -121,13 +123,16 @@ struct MarkdownTextView: NSViewRepresentable {
         var lastRenderedTheme: AppTheme? = nil
         var lastRenderedFontName: String = ""
         var lastRenderedLineSpacing: CGFloat = 0
-        private var pendingRefreshTask: DispatchWorkItem?
-        private var isRendering = false
-        
-        private let parser = MarkdownParser()
+
         private let renderer = MarkdownRenderer()
-        private let documentState = MarkdownDocumentState()
-        private var document = MarkdownDocument(source: "", blocks: [], affectedRange: nil, blockDiff: nil, revision: 0)
+        // 解析栈全部下沉到后台引擎，Coordinator（主线程）不再持有 parser / documentState。
+        private let engine = MarkdownParsingEngine()
+
+        // 主线程侧的极简状态：编辑序号 + 跳帧赶齐标记 + 绑定回写抑制标记。
+        private var editSerial: UInt64 = 0
+        private var needsFullCatchup = false
+        private var isLoadingContent = false
+        var suppressStringSync = false
 
         init(parent: MarkdownTextView) {
             self.parent = parent
@@ -137,17 +142,47 @@ struct MarkdownTextView: NSViewRepresentable {
             self.textView = textView
         }
 
-       func scheduleDeferredRefresh() {
-            pendingRefreshTask?.cancel()
-            let task = DispatchWorkItem { [weak self] in
-                guard let self = self else { return }
+        // MARK: 内容装载（初次 / 笔记切换）——走全量解析，不经增量管线
 
-                self.isRendering = true
-                self.refreshFull()
-                self.isRendering = false // 渲染彻底结束，解锁
+        func setContent(_ text: String, on textView: MarkdownNativeTextView) {
+            // 置位屏蔽：programmatic 的整篇 setString 会同步触发 willProcessEditing，
+            // 此处跳过增量入队，改由 load() 做一次干净的全量解析 + 全量渲染（含缓存清理）。
+            isLoadingContent = true
+            textView.string = text
+            isLoadingContent = false
+            load(text: text)
+        }
+
+        private func load(text: String) {
+            editSerial &+= 1                 // 作废所有在途的旧编辑结果
+            needsFullCatchup = false
+            let expected = editSerial
+            engine.load(text: text) { [weak self] snapshot in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.editSerial == expected,
+                          let textView = self.textView,
+                          let storage = textView.textStorage,
+                          storage.length == snapshot.textLength else { return }
+                    self.renderFull(blocks: snapshot.blocks)
+                }
             }
-            pendingRefreshTask = task
-            DispatchQueue.main.async(execute: task)
+        }
+
+        // MARK: 主题/字体变化——仅整篇重渲染，不重解析
+
+        func rerenderFull() {
+            let expected = editSerial
+            engine.snapshot { [weak self] snapshot in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.editSerial == expected,
+                          let textView = self.textView,
+                          let storage = textView.textStorage,
+                          storage.length == snapshot.textLength else { return }
+                    self.renderFull(blocks: snapshot.blocks)
+                }
+            }
         }
 
         // MARK: NSTextStorageDelegate
@@ -159,78 +194,100 @@ struct MarkdownTextView: NSViewRepresentable {
             changeInLength delta: Int
         ) {
             guard editedMask.contains(.editedCharacters) else { return }
+            guard !isLoadingContent else { return }   // 整篇装载由 load() 负责，跳过增量入队
 
-            if let textView, textView.hasMarkedText() {
-                parser.syncTextOnly(source: textStorage.string, state: documentState)
-                document = documentState.makeDocument(source: textStorage.string, affectedRange: nil)
+            // 主线程仅做极简记录：读取“极小的插入子串”（O(编辑量)），绝不读取全量字符串。
+            let inserted = textStorage.attributedSubstring(from: editedRange).string
+            editSerial &+= 1
+            let serial = editSerial
+
+            // 重型解析投递到后台高优先级串行队列；主线程立即返回，不阻塞输入。
+            engine.apply(editedRange: editedRange, delta: delta, inserted: inserted, serial: serial) { [weak self] result in
+                DispatchQueue.main.async { self?.onEditResult(result) }
+            }
+        }
+
+        // MARK: 后台解析结果回到主线程（coalescing + 最小化原子刷新）
+
+        private func onEditResult(_ result: MarkdownEditResult) {
+            guard let textView, let storage = textView.textStorage else { return }
+
+            // 陈旧结果丢弃：有更新的编辑在途或文本长度已变，则本次结果作废，
+            // 记账 needsFullCatchup，待最新一帧统一赶齐（避免漏渲染跳过的中间态）。
+            let isLatest = (result.serial == editSerial) && (storage.length == result.textLength)
+            guard isLatest else {
+                needsFullCatchup = true
                 return
             }
 
-            document = parser.update(source: textStorage.string, editedRange: editedRange, changeInLength: delta, state: documentState)
+            // 回写 SwiftUI 绑定：全文已在后台物化，主线程仅做 O(1) 的 CoW 赋值。
+            suppressStringSync = true
+            parent.text = result.source
+
+            guard !textView.hasMarkedText() else { return }   // IME 组字过程中不渲染
+
+            if needsFullCatchup {
+                needsFullCatchup = false
+                catchUpFullRender(expectedSerial: result.serial)
+            } else if let diff = result.blockDiff, !diff.isEmpty {
+                renderIncremental(affectedRange: result.affectedRange, blockDiff: diff)
+            }
+        }
+
+        // 跳帧后赶齐：让后台物化最新全量块，主线程一次性整篇刷新。
+        private func catchUpFullRender(expectedSerial: UInt64) {
+            engine.snapshot { [weak self] snapshot in
+                DispatchQueue.main.async {
+                    guard let self,
+                          let textView = self.textView,
+                          let storage = textView.textStorage,
+                          self.editSerial == expectedSerial,
+                          storage.length == snapshot.textLength else {
+                        self?.needsFullCatchup = true
+                        return
+                    }
+                    self.renderFull(blocks: snapshot.blocks)
+                }
+            }
         }
 
         // MARK: NSTextViewDelegate
 
-        func textDidChange(_ notification: Notification) {
-            // 如果是因为我们自己在 refreshFull 导致的文本属性变更，绝不回写给 SwiftUI！
-            guard let textView, !isRendering else { return } 
-            
-            // 只有当用户真正敲击键盘输入、引起字符不一致时，才同步给外部
-            if parent.text != textView.string {
-                parent.text = textView.string
-            }
+        func textViewDidChangeSelection(_ notification: Notification) {}
 
-            if textView.hasMarkedText() {
-                return
-            }
+        // MARK: 渲染
 
-            guard document.affectedRange != nil else { return }
+        private func renderIncremental(affectedRange: NSRange?, blockDiff: MarkdownBlockDiff) {
+            guard let textView else { return }
             renderer.bodyFontName = parent.fontName
             renderer.lineSpacingMultiplier = parent.lineSpacing
-            renderer.render(
-                .init(
-                    textView: textView,
-                    theme: parent.theme,
-                    document: document,
-                    onToggleChecklist: { [weak self] range, isChecked in
-                        self?.toggleChecklist(in: range, to: isChecked)
-                    },
-                    onTapImage: { path in
-                        NSWorkspace.shared.openFile(path)
-                    }
-                )
-            )
+            let document = MarkdownDocument(source: "", affectedRange: affectedRange, blockDiff: blockDiff, revision: 0)
+            renderer.render(makeContext(textView: textView, document: document))
+        }
 
+        private func renderFull(blocks: [MarkdownBlock]) {
+            guard let textView else { return }
+            renderer.bodyFontName = parent.fontName
+            renderer.lineSpacingMultiplier = parent.lineSpacing
+            let document = MarkdownDocument(source: "", affectedRange: nil, blockDiff: nil, revision: 0, explicitBlocks: blocks)
+            renderer.render(makeContext(textView: textView, document: document))
             lastRenderedTheme = parent.theme
             lastRenderedFontName = parent.fontName
             lastRenderedLineSpacing = parent.lineSpacing
         }
 
-        func textViewDidChangeSelection(_ notification: Notification) {}
-
-        // MARK: Explicit full renders (theme change only — note switches handled by willProcessEditing)
-
-        func refreshFull() {
-            guard let textView else { return }
-            renderer.bodyFontName = parent.fontName
-            renderer.lineSpacingMultiplier = parent.lineSpacing
-            document = parser.reparseAll(source: textView.string, state: documentState)
-            renderer.render(
-                .init(
-                    textView: textView,
-                    theme: parent.theme,
-                    document: MarkdownDocument(source: document.source, blocks: document.blocks, affectedRange: nil, blockDiff: nil, revision: document.revision),
-                    onToggleChecklist: { [weak self] range, isChecked in
-                        self?.toggleChecklist(in: range, to: isChecked)
-                    },
-                    onTapImage: { path in
-                        NSWorkspace.shared.openFile(path)
-                    }
-                )
+        private func makeContext(textView: MarkdownNativeTextView, document: MarkdownDocument) -> MarkdownRenderContext {
+            MarkdownRenderContext(
+                textView: textView,
+                theme: parent.theme,
+                document: document,
+                onToggleChecklist: { [weak self] range, isChecked in
+                    self?.toggleChecklist(in: range, to: isChecked)
+                },
+                onTapImage: { path in
+                    NSWorkspace.shared.openFile(path)
+                }
             )
-            lastRenderedTheme = parent.theme
-            lastRenderedFontName = parent.fontName
-            lastRenderedLineSpacing = parent.lineSpacing
         }
 
         // MARK: Checklist toggle

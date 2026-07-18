@@ -8,7 +8,9 @@ enum MarkdownAttachmentType {
 }
 
 final class CheckboxAttachment: NSTextAttachment {
-    let range: NSRange
+    // range 需可变：id 缓存命中时绝对行范围可能因前面行增删而偏移，
+    // 必须刷新为最新 lineRange，否则 toggle 回调会作用到错误的行。
+    var range: NSRange
     private(set) var isChecked: Bool
     var onToggle: (NSRange, Bool) -> Void
 
