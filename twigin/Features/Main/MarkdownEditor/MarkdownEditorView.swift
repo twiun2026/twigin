@@ -59,8 +59,6 @@ struct MarkdownTextView: NSViewRepresentable {
         guard let textView = nsView.documentView as? MarkdownNativeTextView else { return }
 
         textView.insertionPointColor = NSColor(theme.textMain)
-        let newFont = resolvedFont()
-        if textView.font != newFont { textView.font = newFont }
 
         let bgColor = NSColor(theme.bgNoteEditor)
         if textView.backgroundColor != bgColor {
@@ -83,6 +81,11 @@ struct MarkdownTextView: NSViewRepresentable {
         if context.coordinator.lastRenderedTheme != theme
            || context.coordinator.lastRenderedFontName != fontName
            || context.coordinator.lastRenderedLineSpacing != lineSpacing {
+            // 仅在字体真正变化时重置 textView.font（该 setter 会覆盖全文 font 属性），
+            // 随后 rerenderFull 逐段重新涂抹标题/粗体/斜体字体。
+            if context.coordinator.lastRenderedFontName != fontName {
+                textView.font = resolvedFont()
+            }
             context.coordinator.lastRenderedTheme = theme
             context.coordinator.lastRenderedFontName = fontName
             context.coordinator.lastRenderedLineSpacing = lineSpacing
@@ -285,7 +288,8 @@ struct MarkdownTextView: NSViewRepresentable {
                     self?.toggleChecklist(in: range, to: isChecked)
                 },
                 onTapImage: { path in
-                    NSWorkspace.shared.openFile(path)
+                    let fileURL = URL(fileURLWithPath: path)
+                    NSWorkspace.shared.open(fileURL)
                 }
             )
         }

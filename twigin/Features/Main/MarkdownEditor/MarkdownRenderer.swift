@@ -164,8 +164,20 @@ final class MarkdownRenderer {
             }
 
             textLayoutManager.invalidateLayout(for: textRange)
-            textLayoutManager.ensureLayout(for: textRange)
         }
+
+        // AppKit/TextKit2 边界 bug：当失效子范围的起点恰为 documentRange.location（偏移 0），
+        // invalidateLayout 不会把首个 layout fragment 标脏，viewport 复用旧几何，导致首行属性
+        // 变更（如 # 标题）不刷新——这正是“第一行不渲染、第二行正常”的根因。首行受影响时，
+        // 补一次整篇 documentRange 失效兜底（仅标脏，viewport 仍按需惰性布局，不遍历全文）。
+        if affectedRanges.contains(where: { $0.location == 0 }) {
+            textLayoutManager.invalidateLayout(for: documentRange)
+        }
+
+        // needsDisplay 只重绘既有 fragment 视图、不会重建；必须 needsLayout 触发 viewport
+        // 布局控制器重新生成 fragment，属性/字号变更才会真正反映到屏幕。
+        textView.needsLayout = true
+        textView.needsDisplay = true
     }
 
     private func mergeRanges(_ ranges: [NSRange]) -> [NSRange] {
