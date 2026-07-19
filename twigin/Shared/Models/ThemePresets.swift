@@ -93,7 +93,7 @@ struct ThemePresets {
         titleBlack: Color(hex: 0xFF111827),
         bgNoteEditor: Color(hex: 0xFFFFFFFF),
         dragZoneBg: Color(hex: 0xFFF0F4FA),
-        btnSubmit: Color(hex: 0xFF006FFF),
+        btnSubmit: Color(hex: 0xFF6A768E),
         btnDelete: Color(hex: 0xFFF4A261),
         textPrimary: Color(hex: 0xFF268579),
         textSecondary: Color(hex: 0xFF273043),

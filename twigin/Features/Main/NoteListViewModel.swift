@@ -36,8 +36,8 @@ class NoteListViewModel: ObservableObject {
         self.notes = []
     }
     
-    func createNote(in folderId: String) {
-        guard let dao = SQLiteDAO.shared else { return }
+    func createNote(in folderId: String) -> NoteModel.ID? {
+        guard let dao = SQLiteDAO.shared else { return nil }
         let now = Int64(Date().timeIntervalSince1970)
         let newNote = NoteModel(
             noteId: UUID().uuidString,
@@ -50,8 +50,10 @@ class NoteListViewModel: ObservableObject {
         do {
             try dao.note.insert(newNote)
             loadNotes(for: folderId) // Reload the list to show the new note
+            return newNote.id
         } catch {
             print("Failed to create note: \(error)")
+            return nil
         }
     }
     

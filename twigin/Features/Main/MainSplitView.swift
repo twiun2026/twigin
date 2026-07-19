@@ -12,9 +12,25 @@ struct MainSplitView: View {
     
     @State private var selectedFolderId: FolderModel.ID?
     @State private var selectedNoteId: NoteModel.ID?
+    @State private var editorFocusRequest = UUID()
     
     @FocusState private var isNewFolderFocused: Bool
     @FocusState private var focusedColumn: ActiveFocusColumn?
+
+    private func createAndFocusNewNote(in folderId: FolderModel.ID) {
+        guard let newNoteId = noteViewModel.createNote(in: folderId) else { return }
+        selectedNoteId = newNoteId
+        focusedColumn = nil
+        editorFocusRequest = UUID()
+    }
+
+    private func deleteNote(_ noteId: NoteModel.ID, in folderId: FolderModel.ID) {
+        noteViewModel.deleteNote(id: noteId, currentFolderId: folderId)
+        if selectedNoteId == noteId {
+            selectedNoteId = nil
+            focusedColumn = nil
+        }
+    }
     
     var body: some View {
         NavigationSplitView {
@@ -35,16 +51,7 @@ struct MainSplitView: View {
                     }
                     .padding(.vertical, 8)
                     .padding(.horizontal, 12)
-                    .background(
-                        Group {
-                            if selectedFolderId == folder.id {
-                                let color = themeManager.currentTheme.bgSelected
-                                let targetColor = focusedColumn == .folderList ? color : color.opacity(0.5)
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    .fill(targetColor)
-                            }
-                        }
-                    )
+                    .background(folderSelectionBackground(for: folder.id))
                     .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                     .listRowBackground(Color.clear)
                     .contextMenu {
@@ -98,66 +105,74 @@ struct MainSplitView: View {
             
         } content: {
             // Middle Pane: Notes
-            List {
-                ForEach(noteViewModel.notes) { note in
-                    Text(note.title)
-                        .foregroundColor(themeManager.currentTheme.textMain)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            selectedNoteId = note.id
-                            focusedColumn = .noteList
+            VStack(spacing: 0) {
+                List {
+                    ForEach(noteViewModel.notes) { note in
+                        Text(note.title)
+                            .foregroundColor(themeManager.currentTheme.textMain)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 12)
+                            .background(
+                                Group {
+                                    if selectedNoteId == note.id {
+                                        let color = themeManager.currentTheme.bgSelected
+                                        let targetColor = focusedColumn == .noteList ? color : color.opacity(0.5)
+                                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                            .fill(targetColor)
+                                    }
+                                }
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                selectedNoteId = note.id
+                                focusedColumn = .noteList
+                            }
+                            .listRowBackground(Color.clear)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                            .padding(.bottom, 8)
+                            .contextMenu {
+                                Button("New Note") {
+                                    if let folderId = selectedFolderId {
+                                        createAndFocusNewNote(in: folderId)
+                                    }
+                                }
+                                Button("Pin Note") { }
+                                Divider()
+                                Button("Delete Note", role: .destructive) {
+                                    if let folderId = selectedFolderId {
+                                        deleteNote(note.id, in: folderId)
+                                    }
+                                }
+                            }
+                    }
+                }
+                .scrollContentBackground(.hidden)
+                .background(themeManager.currentTheme.bgNoteList)
+                .focused($focusedColumn,equals: .noteList)
+                .environment(\.defaultMinListRowHeight, 40)
+                .toolbar(id: "notes_toolbar") {
+                    ToolbarItem(id: "new_note", placement: .primaryAction) {
+                        Button {
+                            if let folderId = selectedFolderId {
+                                createAndFocusNewNote(in: folderId)
+                            }
+                        } label: {
+                            Label("New Note", systemImage: "plus")
                         }
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 12)
-                        .background(
-                            Group {
-                                if selectedNoteId == note.id {
-                                    let color = themeManager.currentTheme.bgSelected
-                                    let targetColor = focusedColumn == .noteList ? color : color.opacity(0.5)
-                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                        .fill(targetColor)
-                                }
-                            }
-                        )
-                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-                        .listRowBackground(Color.clear)
-                        .contextMenu {
-                            Button("New Note") {
-                                if let folderId = selectedFolderId {
-                                    noteViewModel.createNote(in: folderId)
-                                }
-                            }
-                            Button("Pin Note") { }
-                            Divider()
-                            Button("Delete Note", role: .destructive) {
-                                if let folderId = selectedFolderId {
-                                    noteViewModel.deleteNote(id: note.id, currentFolderId: folderId)
-                                }
-                            }
-                        }
+                        .disabled(selectedFolderId == nil)
+                    }
                 }
             }
             .navigationTitle("Notes")
-            .scrollContentBackground(.hidden)
-            .background(themeManager.currentTheme.bgNoteList)
-            .focused($focusedColumn, equals: .noteList)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        if let folderId = selectedFolderId {
-                            noteViewModel.createNote(in: folderId)
-                        }
-                    } label: {
-                        Label("New Note", systemImage: "plus")
-                    }
-                    .disabled(selectedFolderId == nil)
-                }
-            }
         } detail: {
             // Right Pane: Detail
             if let selectedNoteId = selectedNoteId {
-                NoteEditorView(noteId: selectedNoteId, viewModel: noteViewModel)
+                NoteEditorView(
+                    noteId: selectedNoteId,
+                    viewModel: noteViewModel,
+                    focusRequest: editorFocusRequest
+                )
                     .background(themeManager.currentTheme.bgNoteEditor)
             } else {
                 Text("No note selected")
@@ -172,11 +187,22 @@ struct MainSplitView: View {
         .onChange(of: selectedFolderId) { _, newFolderId in
             if let newFolderId = newFolderId {
                 noteViewModel.loadNotes(for: newFolderId)
+                selectedNoteId = nil
                 focusedColumn = .noteList
             } else {
                 noteViewModel.clearNotes()
                 selectedNoteId = nil
             }
+        }
+    }
+
+    @ViewBuilder
+    private func folderSelectionBackground(for folderId: FolderModel.ID) -> some View {
+        if selectedFolderId == folderId {
+            let baseColor = themeManager.currentTheme.bgSelected
+            let selectedColor = focusedColumn == .folderList ? baseColor : baseColor.opacity(0.5)
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(selectedColor)
         }
     }
 }

@@ -5,9 +5,16 @@ struct MarkdownEditorView: View {
     var theme: AppTheme
     var fontName: String = ""
     var lineSpacing: CGFloat = 0
+    var focusRequest: UUID? = nil
 
     var body: some View {
-        MarkdownTextView(text: $text, theme: theme, fontName: fontName, lineSpacing: lineSpacing)
+        MarkdownTextView(
+            text: $text,
+            theme: theme,
+            fontName: fontName,
+            lineSpacing: lineSpacing,
+            focusRequest: focusRequest
+        )
     }
 }
 
@@ -16,6 +23,7 @@ struct MarkdownTextView: NSViewRepresentable {
     var theme: AppTheme
     var fontName: String = ""
     var lineSpacing: CGFloat = 0
+    var focusRequest: UUID? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -31,6 +39,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
         textView.backgroundColor = NSColor(theme.bgNoteEditor)
         textView.insertionPointColor = NSColor(theme.textMain)
+    textView.selectedTextAttributes = selectedTextAttributes(for: theme)
         textView.font = resolvedFont()
 
         context.coordinator.bind(textView: textView)
@@ -40,6 +49,7 @@ struct MarkdownTextView: NSViewRepresentable {
         context.coordinator.lastRenderedFontName = fontName
         context.coordinator.lastRenderedLineSpacing = lineSpacing
         context.coordinator.setContent(text, on: textView)
+        context.coordinator.consumeFocusRequestIfNeeded(focusRequest)
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
@@ -59,6 +69,7 @@ struct MarkdownTextView: NSViewRepresentable {
         guard let textView = nsView.documentView as? MarkdownNativeTextView else { return }
 
         textView.insertionPointColor = NSColor(theme.textMain)
+        textView.selectedTextAttributes = selectedTextAttributes(for: theme)
 
         let bgColor = NSColor(theme.bgNoteEditor)
         if textView.backgroundColor != bgColor {
@@ -91,6 +102,8 @@ struct MarkdownTextView: NSViewRepresentable {
             context.coordinator.lastRenderedLineSpacing = lineSpacing
             context.coordinator.rerenderFull()
         }
+
+        context.coordinator.consumeFocusRequestIfNeeded(focusRequest)
     }
 
     private func resolvedFont() -> NSFont {
@@ -118,6 +131,12 @@ struct MarkdownTextView: NSViewRepresentable {
         return NSFont(descriptor: cascadedDescriptor, size: size) ?? primaryFont
     }
 
+    private func selectedTextAttributes(for theme: AppTheme) -> [NSAttributedString.Key: Any] {
+        [
+            .backgroundColor: NSColor(theme.bgSelected)
+        ]
+    }
+
     // MARK: - Coordinator
 
     final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
@@ -126,6 +145,7 @@ struct MarkdownTextView: NSViewRepresentable {
         var lastRenderedTheme: AppTheme? = nil
         var lastRenderedFontName: String = ""
         var lastRenderedLineSpacing: CGFloat = 0
+        private var lastConsumedFocusRequest: UUID?
 
         private let renderer = MarkdownRenderer()
         // 解析栈全部下沉到后台引擎，Coordinator（主线程）不再持有 parser / documentState。
@@ -143,6 +163,22 @@ struct MarkdownTextView: NSViewRepresentable {
 
         func bind(textView: MarkdownNativeTextView) {
             self.textView = textView
+        }
+
+        func consumeFocusRequestIfNeeded(_ focusRequest: UUID?) {
+            guard let focusRequest, focusRequest != lastConsumedFocusRequest else { return }
+            lastConsumedFocusRequest = focusRequest
+            focusEditorAtStart()
+        }
+
+        private func focusEditorAtStart() {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let textView = self.textView else { return }
+                let insertionPoint = NSRange(location: 0, length: 0)
+                textView.setSelectedRange(insertionPoint)
+                textView.scrollRangeToVisible(insertionPoint)
+                textView.window?.makeFirstResponder(textView)
+            }
         }
 
         // MARK: 内容装载（初次 / 笔记切换）——走全量解析，不经增量管线

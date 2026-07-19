@@ -3,6 +3,7 @@ import SwiftUI
 struct NoteEditorView: View {
     let noteId: String
     @ObservedObject var viewModel: NoteListViewModel
+    let focusRequest: UUID
     @EnvironmentObject private var themeManager: ThemeManager
     
     @State private var content: String = ""
@@ -16,7 +17,10 @@ struct NoteEditorView: View {
             } else {
                 MarkdownEditorView(
                     text: $content,
-                    theme: themeManager.currentTheme
+                    theme: themeManager.currentTheme,
+                    fontName: themeManager.selectedFontName,
+                    lineSpacing: CGFloat(themeManager.lineSpacing),
+                    focusRequest: focusRequest
                 )
                 .padding()
                 .onChange(of: content) { _, newContent in
