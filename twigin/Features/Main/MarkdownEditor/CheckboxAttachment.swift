@@ -7,57 +7,28 @@ enum MarkdownAttachmentType {
     static let imageUTI = "com.twigin.markdown.image"
 }
 
-final class CheckboxAttachment: NSTextAttachment {
-    // range 需可变：id 缓存命中时绝对行范围可能因前面行增删而偏移，
-    // 必须刷新为最新 lineRange，否则 toggle 回调会作用到错误的行。
-    var range: NSRange
-    private(set) var isChecked: Bool
-    var onToggle: (NSRange, Bool) -> Void
-
-    init(range: NSRange, isChecked: Bool, onToggle: @escaping (NSRange, Bool) -> Void) {
-        self.range = range
-        self.isChecked = isChecked
-        self.onToggle = onToggle
-        super.init(data: nil, ofType: MarkdownAttachmentType.checkboxUTI)
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func toggle() {
-        isChecked.toggle()
-        onToggle(range, isChecked)
+// 复选框改用“图片型附件”内联绘制，不再依赖 NSTextAttachmentViewProvider。
+// 原因：content-storage 委托在显示层动态创建的附件，其 view provider 的 loadView()
+// 不会被 TextKit2 布局管线可靠触发，导致 U+FFFC 占位但复选框视图从未挂载（空白）。
+// 图片附件由布局直接绘制，稳定可见；点击交互由 NSTextView 的命中测试处理。
+enum CheckboxImageFactory {
+    static func make(isChecked: Bool, color: NSColor, size: CGFloat = 13) -> NSImage? {
+        let symbolName = isChecked ? "checkmark.square.fill" : "square"
+        let config = NSImage.SymbolConfiguration(pointSize: size, weight: .regular)
+        guard let base = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config) else { return nil }
+        return base.tinted(with: color)
     }
 }
 
-final class CheckboxAttachmentViewProvider: NSTextAttachmentViewProvider {
-    override func loadView() {
-        guard let checkboxAttachment = textAttachment as? CheckboxAttachment else {
-            view = nil
-            return
-        }
-
-        let button = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-        button.state = checkboxAttachment.isChecked ? .on : .off
-        button.setButtonType(.switch)
-        button.bezelStyle = .regularSquare
-        button.controlSize = .small
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.action = #selector(handleToggle)
-        button.target = self
-
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 18, height: 18))
-        container.addSubview(button)
-        NSLayoutConstraint.activate([
-            button.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            button.centerYAnchor.constraint(equalTo: container.centerYAnchor)
-        ])
-
-        view = container
-    }
-
-    @objc private func handleToggle() {
-        (textAttachment as? CheckboxAttachment)?.toggle()
+extension NSImage {
+    func tinted(with color: NSColor) -> NSImage {
+        guard let copy = self.copy() as? NSImage else { return self }
+        copy.lockFocus()
+        color.set()
+        NSRect(origin: .zero, size: copy.size).fill(using: .sourceAtop)
+        copy.unlockFocus()
+        copy.isTemplate = false
+        return copy
     }
 }

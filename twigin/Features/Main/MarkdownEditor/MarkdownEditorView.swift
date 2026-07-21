@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct MarkdownEditorView: View {
@@ -36,6 +37,14 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.allowsUndo = true
         textView.usesFindBar = true
         textView.delegate = context.coordinator
+
+        // 显示层附件桥接：见 Coordinator 的 NSTextContentStorageDelegate 实现。
+        if let contentStorage = textView.textLayoutManager?.textContentManager as? NSTextContentStorage {
+            contentStorage.delegate = context.coordinator
+        }
+        textView.onCheckboxClick = { [weak coordinator = context.coordinator] index in
+            coordinator?.handleCheckboxClick(at: index) ?? false
+        }
 
         textView.backgroundColor = NSColor(theme.bgNoteEditor)
         textView.insertionPointColor = NSColor(theme.textMain)
@@ -139,7 +148,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
     // MARK: - Coordinator
 
-    final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
+    final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate, NSTextContentStorageDelegate {
         var parent: MarkdownTextView
         weak var textView: MarkdownNativeTextView?
         var lastRenderedTheme: AppTheme? = nil
@@ -290,6 +299,114 @@ struct MarkdownTextView: NSViewRepresentable {
             }
         }
 
+        // MARK: NSTextContentStorageDelegate
+
+        // TextKit2 只为“附件字符 U+FFFC”预留版面。这里在“显示层”按正则识别 checklist 行，
+        // 把标记首字符等长替换为携带图片附件的 U+FFFC，其余标记字符隐藏；后端 markdown
+        // 源与偏移保持 1:1 不变。直接由“当前显示文本”驱动，不依赖后台异步渲染时序，
+        // 也不使用 view provider（其 loadView 在委托替换段落里不会被可靠触发），
+        // 改用图片附件由布局直接绘制，保证复选框稳定可见。
+        static let checklistDisplayRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[([ xX])\\]\\s*)(.*)$")
+
+        // 复选框附件按 isChecked 缓存并复用同一实例——附件属性值稳定不变，
+        // TextKit2 才不会在每次编辑重排时重新测量附件，从而消除后续文字抖动。
+        // 缓存随“主题 + 正文字体度量”失效（不同字体行框不同，附件尺寸需重算）。
+        private var checkboxAttachmentCache: [Bool: NSTextAttachment] = [:]
+        private var checkboxThemeKey: AppTheme?
+        private var checkboxFontKey: String = ""
+
+        private func checkboxAttachment(isChecked: Bool, font: NSFont) -> NSTextAttachment {
+            let fontKey = "\(font.fontName):\(font.pointSize)"
+            if checkboxThemeKey != parent.theme || checkboxFontKey != fontKey {
+                checkboxAttachmentCache.removeAll()
+                checkboxThemeKey = parent.theme
+                checkboxFontKey = fontKey
+            }
+            if let cached = checkboxAttachmentCache[isChecked] { return cached }
+            let color = NSColor(isChecked ? parent.theme.textMain : parent.theme.textMuted)
+            let attachment = NSTextAttachment()
+            attachment.image = CheckboxImageFactory.make(isChecked: isChecked, color: color)
+            // 让附件 footprint 严格落在正文字体 ascent/descent 的【内部】（上下各内缩 inset），
+            // 绝不与文字“平局”共同决定行高。这样含复选框的行，其自然行高/基线与普通段落完全一致，
+            // 行高（= 自然行高 × lineHeightMultiple 的小数值）不再因附件参与而取整抖动。
+            let inset: CGFloat = 1
+            let top = font.ascender - inset          // < ascender
+            let bottom = font.descender + inset       // > descender
+            let side = max(1, top - bottom)
+            attachment.bounds = CGRect(x: 0, y: bottom, width: side, height: side)
+            checkboxAttachmentCache[isChecked] = attachment
+            return attachment
+        }
+
+        func textContentStorage(_ textContentStorage: NSTextContentStorage, textParagraphWith range: NSRange) -> NSTextParagraph? {
+            guard let backing = textContentStorage.textStorage else { return nil }
+            let paragraph = backing.attributedSubstring(from: range)
+            let ns = paragraph.string as NSString
+
+            guard let match = Coordinator.checklistDisplayRegex.firstMatch(
+                in: paragraph.string,
+                range: NSRange(location: 0, length: ns.length)
+            ) else { return nil }
+
+            let markerRange = match.range(at: 1)
+            guard markerRange.length >= 1 else { return nil }
+            let checkChar = ns.substring(with: match.range(at: 2))
+            let isChecked = checkChar.lowercased() == "x"
+
+            let display = NSMutableAttributedString(attributedString: paragraph)
+
+            // 正文实际字体：整行（载体字符 + 附件度量）统一用它，避免同一行混用两套字体度量。
+            let bodyFont = (textView?.font) ?? NSFont.systemFont(ofSize: 14)
+
+            // 复选框图片附件（内联绘制，稳定可见）；复用缓存实例避免每帧重测导致抖动。
+            let attachment = checkboxAttachment(isChecked: isChecked, font: bodyFont)
+
+            let firstCharRange = NSRange(location: markerRange.location, length: 1)
+            var firstAttrs = paragraph.attributes(at: firstCharRange.location, effectiveRange: nil)
+            firstAttrs[.attachment] = attachment
+            firstAttrs[.foregroundColor] = NSColor.clear
+            // 关键：载体字符用正文字体（不继承 backing 的 1pt），与附件度量一致，行框单一稳定。
+            firstAttrs[.font] = bodyFont
+            display.replaceCharacters(in: firstCharRange, with: NSAttributedString(string: "\u{FFFC}", attributes: firstAttrs))
+
+            // 隐藏标记余下字符（[ ]、空格），保持行长度不变。
+            if markerRange.length > 1 {
+                let hideRange = NSRange(location: markerRange.location + 1, length: markerRange.length - 1)
+                display.addAttributes([
+                    .foregroundColor: NSColor.clear,
+                    .font: NSFont.systemFont(ofSize: 1)
+                ], range: hideRange)
+            }
+
+            return NSTextParagraph(attributedString: display)
+        }
+
+        // 点击命中：把点击处的字符下标映射到 markdown 源行，若为 checklist 且点在标记区内则切换。
+        func handleCheckboxClick(at index: Int) -> Bool {
+            guard let textView else { return false }
+            let ns = textView.string as NSString
+            guard ns.length > 0 else { return false }
+
+            let probe = min(max(index, 0), ns.length - 1)
+            let lineRange = ns.lineRange(for: NSRange(location: probe, length: 0))
+            let lineText = ns.substring(with: lineRange)
+            let lineNS = lineText as NSString
+
+            guard let match = Coordinator.checklistDisplayRegex.firstMatch(
+                in: lineText,
+                range: NSRange(location: 0, length: lineNS.length)
+            ) else { return false }
+
+            let markerRange = match.range(at: 1)
+            let markerEnd = lineRange.location + markerRange.length
+            guard index >= lineRange.location, index <= markerEnd else { return false }
+
+            let checkChar = lineNS.substring(with: match.range(at: 2))
+            let newChecked = checkChar.lowercased() != "x"
+            toggleChecklist(in: lineRange, to: newChecked)
+            return true
+        }
+
         // MARK: NSTextViewDelegate
 
         func textViewDidChangeSelection(_ notification: Notification) {}
@@ -362,7 +479,30 @@ struct MarkdownTextView: NSViewRepresentable {
             let nsString = textView.string as NSString
             let lineRange = nsString.lineRange(for: selectedRange)
             let lineText = nsString.substring(with: lineRange)
+            // Checkbox
+            if let checklistMatch = try? NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[[ xX]\\]\\s*)(.*)$")
+                    .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
+                    
+                    let indentAndPrefix = (lineText as NSString).substring(with: checklistMatch.range(at: 1))
+                    let content = (lineText as NSString).substring(with: checklistMatch.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
 
+                    // 如果本行任务列表无内容，回车则取消任务列表格式
+                    if content.isEmpty {
+                        textView.shouldChangeText(in: lineRange, replacementString: "")
+                        textView.textStorage?.replaceCharacters(in: lineRange, with: "")
+                        textView.didChangeText()
+                        return true
+                    } else {
+                        // 提取缩进并补全未勾选的 `- [ ] `
+                        let leadingSpaces = indentAndPrefix.prefix { $0 == " " || $0 == "\t" }
+                        let autoInsertText = "\n\(leadingSpaces)- [ ] "
+                        if textView.shouldChangeText(in: selectedRange, replacementString: autoInsertText) {
+                            textView.insertText(autoInsertText, replacementRange: selectedRange)
+                            textView.didChangeText()
+                            return true
+                        }
+                    }
+                }
             // Unordered list
             if let bulletMatch = try? NSRegularExpression(pattern: "^(\\s*[-*+])\\s*(.*)$")
                 .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
@@ -384,7 +524,6 @@ struct MarkdownTextView: NSViewRepresentable {
                     }
                 }
             }
-
             // Ordered list
             if let orderedMatch = try? NSRegularExpression(pattern: "^(\\s*)(\\d+)\\.\\s*(.*)$")
                 .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
@@ -407,7 +546,6 @@ struct MarkdownTextView: NSViewRepresentable {
                     }
                 }
             }
-
             // Blockquote
             if let blockquoteMatch = try? NSRegularExpression(pattern: "^(\\s*>)\\s*(.*)$")
                 .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
@@ -435,4 +573,16 @@ struct MarkdownTextView: NSViewRepresentable {
     }
 }
 
-final class MarkdownNativeTextView: NSTextView {}
+final class MarkdownNativeTextView: NSTextView {
+    // 返回 true 表示该次点击命中复选框并已处理，不再走默认光标定位。
+    var onCheckboxClick: ((Int) -> Bool)?
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let index = characterIndexForInsertion(at: point)
+        if let handler = onCheckboxClick, handler(index) {
+            return
+        }
+        super.mouseDown(with: event)
+    }
+}

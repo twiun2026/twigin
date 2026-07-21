@@ -32,7 +32,7 @@ struct ThemePresets {
     static let nightOffice = AppTheme(
         name: "Night Office",
         bgNoteList: Color(hex: 0xFF2C3E50),     // 深蓝灰背景
-        textHeader: Color(hex: 0xFFF5F5F5),     // 标题文字颜色
+        textHeader: Color(hex: 0xFF5CB58F),     // 标题文字颜色
         bgSelected:Color(hex: 0xFF34495E),
         textMain: Color(hex: 0xFFECF0F1),       // 浅灰文字
         textMuted: Color(hex: 0xFFBDC3C7),      // 中灰辅助

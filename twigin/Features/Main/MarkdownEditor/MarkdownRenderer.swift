@@ -11,10 +11,6 @@ struct MarkdownRenderContext {
 }
 
 final class MarkdownRenderer {
-    // 缓存 Key 使用 MarkdownBlock.id（由行内相对坐标 + 语义哈希生成），
-    // 不含绝对 location，前面行增删不会改变某个复选框的 Key，从根源消除错位/泄漏/闪烁。
-    private var checkboxCache: [UInt64: CheckboxAttachment] = [:]
-
     var bodyFontName: String = ""
     var lineSpacingMultiplier: CGFloat = 0
 
@@ -55,10 +51,6 @@ final class MarkdownRenderer {
 
     init() {
         NSTextAttachment.registerViewProviderClass(
-            CheckboxAttachmentViewProvider.self,
-            forFileType: MarkdownAttachmentType.checkboxUTI
-        )
-        NSTextAttachment.registerViewProviderClass(
             MarkdownImageAttachmentViewProvider.self,
             forFileType: MarkdownAttachmentType.imageUTI
         )
@@ -71,22 +63,6 @@ final class MarkdownRenderer {
 
         let renderPlan = makeRenderPlan(document: context.document, storageLength: storageLength)
         guard !renderPlan.ranges.isEmpty else { return }
-
-        // 缓存清理：全量渲染时按存活块过滤；增量渲染仅移除本次删除/被改写的复选框块，
-        // 避免每次编辑都 O(N) 物化并扫描全部块。
-        if let diff = context.document.blockDiff, !diff.isEmpty {
-            for operation in diff.operations {
-                switch operation {
-                case let .delete(block), let .modify(old: block, new: _):
-                    if let key = checkboxKey(for: block) { checkboxCache.removeValue(forKey: key) }
-                case .insert:
-                    break
-                }
-            }
-        } else {
-            let liveKeys = Set(context.document.blocks.compactMap(checkboxKey(for:)))
-            checkboxCache = checkboxCache.filter { liveKeys.contains($0.key) }
-        }
 
         textStorage.beginEditing()
         for range in renderPlan.ranges {
@@ -210,11 +186,6 @@ final class MarkdownRenderer {
         return NSRange(location: lowerBound, length: upperBound - lowerBound)
     }
 
-    private func checkboxKey(for block: MarkdownBlock) -> UInt64? {
-        guard case .checklist = block.kind else { return nil }
-        return block.id
-    }
-
     private func applyBlock(_ block: MarkdownBlock, to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
         switch block.kind {
         case let .heading(level):
@@ -228,7 +199,7 @@ final class MarkdownRenderer {
         case let .checklist(marker):
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyChecklist(blockID: block.id, marker: marker, markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, theme: theme, context: context)
+            applyChecklist(marker: marker, markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, theme: theme, context: context)
 
         case let .image(_, path):
             applyImageLine(path: path, lineRange: block.lineRange, to: attributed, theme: theme)
@@ -250,6 +221,13 @@ final class MarkdownRenderer {
 
         case .codeBlock:
             applyCodeBlock(lineRange: block.lineRange, to: attributed, theme: theme)
+        case .footnote(label: _):
+            guard let markerRange = block.markerRange,
+                  let contentRange = block.contentRange else { return }
+            attributed.addAttributes([
+                .foregroundColor: NSColor(theme.textSecondary)
+            ], range: markerRange)
+            applyInline(block.inlines, to: attributed, theme: theme)
         }
     }
 
@@ -337,7 +315,6 @@ final class MarkdownRenderer {
     }
 
     private func applyChecklist(
-        blockID: UInt64,
         marker: ChecklistMarker,
         markerRange: NSRange,
         contentRange: NSRange,
@@ -351,36 +328,12 @@ final class MarkdownRenderer {
               let content = safeRange(contentRange, in: attributed),
               let line = safeRange(lineRange, in: attributed) else { return }
 
+        // 标记（- [ ] / - [x]）在 backing 上先隐藏；显示层由 content-storage 委托把首字符
+        // 替换为复选框图片附件（见 MarkdownEditorView.Coordinator）。
         attributed.addAttributes([
-            .foregroundColor: NSColor(theme.textMuted),
-            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+            .foregroundColor: NSColor.clear,
+            .font: NSFont.systemFont(ofSize: 1)
         ], range: markerTextRange)
-
-        let isChecked = marker == .checked
-        let cacheKey = blockID
-
-        let attachment: CheckboxAttachment
-        if let cached = checkboxCache[cacheKey], cached.isChecked == isChecked {
-            // 命中：刷新回调与最新绝对行范围（id 稳定但 location 可能已偏移）。
-            cached.range = lineRange
-            cached.onToggle = context.onToggleChecklist
-            attachment = cached
-        } else {
-            attachment = CheckboxAttachment(range: lineRange, isChecked: isChecked, onToggle: context.onToggleChecklist)
-            checkboxCache[cacheKey] = attachment
-        }
-
-        attributed.addAttribute(.attachment, value: attachment,
-                                range: NSRange(location: markerTextRange.location, length: 1))
-
-        if markerTextRange.length > 1 {
-            let remainRange = NSRange(location: markerTextRange.location + 1,
-                                      length: markerTextRange.length - 1)
-            attributed.addAttributes([
-                .foregroundColor: NSColor.clear,
-                .font: NSFont.systemFont(ofSize: 1)
-            ], range: remainRange)
-        }
 
         var contentAttributes: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor(theme.textMain),
@@ -521,6 +474,11 @@ final class MarkdownRenderer {
                 attributed.addAttributes([
                     .foregroundColor: NSColor(theme.textMain),
                     .backgroundColor: NSColor(theme.markerA)
+                ], range: contentRange)
+            case .footnote:
+                attributed.addAttributes([
+                    .foregroundColor: NSColor(theme.textMain),
+                    .superscript: 1
                 ], range: contentRange)
             }
         }

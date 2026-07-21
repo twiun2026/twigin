@@ -31,10 +31,11 @@ nonisolated final class MarkdownParser {
     }
 
     private let headingRegex = try! NSRegularExpression(pattern: "^(\\s{0,3})(#{1,6})(?:\\s+|$)(.*)$")
-    private let checklistRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[( |x|X)\\]\\s*)(.*)$")
+    private let checklistRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[([ xX])\\]\\s*)(.*)$")
     private let unorderedListRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+)(.*)$")
     private let orderedListRegex = try! NSRegularExpression(pattern: "^(\\s*)(\\d+)\\.\\s+(.*)$")
     private let blockquoteRegex = try! NSRegularExpression(pattern: "^(\\s*>\\s?)(.*)$")
+    private let footnoteRegex = try! NSRegularExpression(pattern: "^(\\[\\^([^\\]]+)\\]:)\\s*(.*)$")
     private let imageRegex = try! NSRegularExpression(pattern: "^!\\[([^\\]]*)\\]\\(([^\\)]+)\\)$")
     private let fenceRegex = try! NSRegularExpression(pattern: "^(\\s*)(```|~~~).*$")
 
@@ -45,6 +46,8 @@ nonisolated final class MarkdownParser {
     private let boldUnderscoreRegex = try! NSRegularExpression(pattern: "(__)(?=\\S)(.+?)(?<=\\S)(__)")
     private let italicAsteriskRegex = try! NSRegularExpression(pattern: "(?<!\\*)(\\*)(?=\\S)(.+?)(?<=\\S)(\\*)(?!\\*)")
     private let italicUnderscoreRegex = try! NSRegularExpression(pattern: "(?<!_)(_)(?=\\S)(.+?)(?<=\\S)(_)(?!_)")
+    private let footnoteDefinitionRegex = try! NSRegularExpression(pattern: "^(\\s*\\[\\^([^\\]]+)\\]:)\\s*(.*)$")
+    private let footnoteReferenceRegex = try! NSRegularExpression(pattern: "\\[\\^([^\\]]+)\\]")
 
     func reparseAll(source: String, state: MarkdownDocumentState) -> MarkdownDocument {
         reconcile(source: source, editedRange: NSRange(location: 0, length: state.totalLength), changeInLength: (source as NSString).length - state.totalLength, state: state, forceFull: true)
@@ -400,7 +403,6 @@ nonisolated final class MarkdownParser {
                 containsUnresolvedSyntax: false
             )
         }
-
         if let match = headingRegex.firstMatch(in: line.text, range: fullRange) {
             let markerLocal = match.range(at: 2)
             let contentLocal = match.range(at: 3)
@@ -420,34 +422,34 @@ nonisolated final class MarkdownParser {
                 containsUnresolvedSyntax: false
             )
         }
-
-        if let match = checklistRegex.firstMatch(in: line.text, range: fullRange) {
-            let markerLocal = match.range(at: 1)
-            let markerValue = match.range(at: 2)
-            let contentLocal = match.range(at: 3)
-            let markerChar = markerValue.location != NSNotFound ? nsText.substring(with: markerValue) : " "
-            let checklistMarker: ChecklistMarker = markerChar.lowercased() == "x" ? .checked : .unchecked
+        if let match = footnoteRegex.firstMatch(in: line.text, range: fullRange) {
+            let markerLocal = match.range(at: 1) // "[^1]:"
+            let labelLocal = match.range(at: 2)  // "1"
+            let contentLocal = match.range(at: 3)// "解释内容"
+            
+            let label = nsText.substring(with: labelLocal)
             let contentRange = absoluteRange(contentLocal, base: line.range.location)
             let contentText = nsText.substring(with: contentLocal)
+            
             let block = makeBlock(
-                kind: .checklist(marker: checklistMarker),
+                kind: .footnote(label: label),
                 line: line,
                 markerRange: absoluteRange(markerLocal, base: line.range.location),
                 contentRange: contentRange,
+                // 脚注定义后面通常也可以包含粗体等普通行内样式
                 inlines: parseInlines(in: contentText, baseOffset: contentRange.location)
             )
+            
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
-                outgoingState: incomingState.settingListStack([
-                    ParserState.ListContext(kind: .checklist, indent: leadingIndent(in: line.text))
-                ]),
+                // 解析到脚注定义后，更新状态机的 footnote 状态（这里设置为激活，或者保持常规）
+                outgoingState: incomingState.settingQuoteDepth(0).settingListStack([]),
                 blocks: [block],
                 textHash: textHash,
                 containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
             )
         }
-
         if let match = blockquoteRegex.firstMatch(in: line.text, range: fullRange) {
             let markerLocal = match.range(at: 1)
             let contentLocal = match.range(at: 2)
@@ -469,7 +471,46 @@ nonisolated final class MarkdownParser {
                 containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
             )
         }
+        if let match = checklistRegex.firstMatch(in: line.text, range: fullRange) {
+            let markerLocal = match.range(at: 1)
+            let markerValue = match.range(at: 2)
+            let contentLocal = match.range(at: 3)
+            
+            let markerChar = (markerValue.location != NSNotFound && markerValue.length > 0)
+                ? nsText.substring(with: markerValue)
+                : " "
+            let checklistMarker: ChecklistMarker = markerChar.lowercased() == "x" ? .checked : .unchecked
 
+            let contentRange: NSRange
+            let contentText: String
+            if contentLocal.location != NSNotFound && contentLocal.length > 0 {
+                contentRange = absoluteRange(contentLocal, base: line.range.location)
+                contentText = nsText.substring(with: contentLocal)
+            } else {
+                let absoluteMarkerEnd = line.range.location + markerLocal.length
+                contentRange = NSRange(location: absoluteMarkerEnd, length: 0)
+                contentText = ""
+            }
+            
+            let block = makeBlock(
+                kind: .checklist(marker: checklistMarker),
+                line: line,
+                markerRange: absoluteRange(markerLocal, base: line.range.location),
+                contentRange: contentRange,
+                inlines: parseInlines(in: contentText, baseOffset: contentRange.location)
+            )
+            
+            return makeLineState(
+                line: line,
+                incomingState: incomingState,
+                outgoingState: incomingState.settingListStack([
+                    ParserState.ListContext(kind: .checklist, indent: leadingIndent(in: line.text))
+                ]),
+                blocks: [block],
+                textHash: textHash,
+                containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
+            )
+        }
         if let match = orderedListRegex.firstMatch(in: line.text, range: fullRange) {
             let leading = match.range(at: 1)
             let digits = match.range(at: 2)
@@ -496,7 +537,6 @@ nonisolated final class MarkdownParser {
                 containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
             )
         }
-
         if let match = unorderedListRegex.firstMatch(in: line.text, range: fullRange) {
             let markerLocal = match.range(at: 1)
             let contentLocal = match.range(at: 2)
@@ -520,7 +560,6 @@ nonisolated final class MarkdownParser {
                 containsUnresolvedSyntax: containsUnresolvedInlineSyntax(in: contentText)
             )
         }
-
         if let match = imageRegex.firstMatch(in: line.text, range: fullRange) {
             let alt = nsText.substring(with: match.range(at: 1))
             let path = nsText.substring(with: match.range(at: 2))
@@ -540,7 +579,7 @@ nonisolated final class MarkdownParser {
                 containsUnresolvedSyntax: false
             )
         }
-
+        
         if let indent = incomingState.listIndent,
            leadingIndent(in: line.text) > indent {
             let block = makeBlock(
@@ -641,6 +680,27 @@ nonisolated final class MarkdownParser {
         appendMatches(from: boldUnderscoreRegex, in: text, baseOffset: baseOffset, kind: .bold, into: &inlines)
         appendMatches(from: italicAsteriskRegex, in: text, baseOffset: baseOffset, kind: .italic, into: &inlines)
         appendMatches(from: italicUnderscoreRegex, in: text, baseOffset: baseOffset, kind: .italic, into: &inlines)
+        
+        let nsText = text as NSString
+            let range = NSRange(location: 0, length: nsText.length)
+            for match in footnoteReferenceRegex.matches(in: text, range: range) {
+                // match.range(at: 0) 是完整的 "[^1]"
+                let fullInlineRange = absoluteRange(match.range(at: 0), base: baseOffset)
+                
+                // 为了配合未来的“移入显示/移出隐藏”功能，我们将：
+                // 开头和结尾包裹符号作为 markerOpen/Close，中间的数字作为 textRange
+                // 这样当你隐藏标记时，可以只隐藏 "[^" 和 "]"，把数字保留并上标显示。
+                let openRange = NSRange(location: fullInlineRange.location, length: 2) // "[^"
+                let bodyRange = NSRange(location: fullInlineRange.location + 2, length: fullInlineRange.length - 3) // "1"
+                let closeRange = NSRange(location: fullInlineRange.upperBound - 1, length: 1) // "]"
+                
+                inlines.append(MarkdownInline(
+                    kind: .footnote,
+                    markerOpen: openRange,
+                    textRange: bodyRange,
+                    markerClose: closeRange
+                ))
+            }
 
         return inlines.sorted {
             if $0.textRange.location == $1.textRange.location {

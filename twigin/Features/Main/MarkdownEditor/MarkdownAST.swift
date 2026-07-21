@@ -234,6 +234,7 @@ nonisolated struct MarkdownBlock: Hashable, Sendable {
         case orderedList(index: Int)
         case blockquote
         case codeBlock
+        case footnote(label: String)
 
         var stableKey: String {
             switch self {
@@ -253,6 +254,8 @@ nonisolated struct MarkdownBlock: Hashable, Sendable {
                 return "blockquote"
             case .codeBlock:
                 return "codeblock"
+            case let .footnote(label):
+                return "footnote:\(label)"
             }
         }
     }
@@ -333,6 +336,7 @@ nonisolated struct MarkdownInline: Hashable, Sendable {
         case strike
         case code
         case highlight
+        case footnote = "footnoteReference"
     }
 
     var kind: Kind
