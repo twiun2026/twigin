@@ -278,7 +278,7 @@ struct MarkdownTextView: NSViewRepresentable {
                 needsFullCatchup = false
                 catchUpFullRender(expectedSerial: result.serial)
             } else if let diff = result.blockDiff, !diff.isEmpty {
-                renderIncremental(affectedRange: result.affectedRange, blockDiff: diff)
+                renderIncremental(affectedRange: result.affectedRange, blockDiff: diff, allBlocks: result.allBlocks)
             }
         }
 
@@ -413,11 +413,11 @@ struct MarkdownTextView: NSViewRepresentable {
 
         // MARK: 渲染
 
-        private func renderIncremental(affectedRange: NSRange?, blockDiff: MarkdownBlockDiff) {
+        private func renderIncremental(affectedRange: NSRange?, blockDiff: MarkdownBlockDiff, allBlocks: [MarkdownBlock]) {
             guard let textView else { return }
             renderer.bodyFontName = parent.fontName
             renderer.lineSpacingMultiplier = parent.lineSpacing
-            let document = MarkdownDocument(source: "", affectedRange: affectedRange, blockDiff: blockDiff, revision: 0)
+            let document = MarkdownDocument(source: "", affectedRange: affectedRange, blockDiff: blockDiff, revision: 0, explicitBlocks: allBlocks)
             renderer.render(makeContext(textView: textView, document: document))
         }
 
@@ -504,10 +504,11 @@ struct MarkdownTextView: NSViewRepresentable {
                     }
                 }
             // Unordered list
-            if let bulletMatch = try? NSRegularExpression(pattern: "^(\\s*[-*+])\\s*(.*)$")
+            // (必须要求 [-*+] 后面跟随至少一个空格或 Tab，符合 CommonMark 列表规范)
+            if let bulletMatch = try? NSRegularExpression(pattern: "^(\\s*[-*+][ \t]+)(.*)$")
                 .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
 
-                let marker = (lineText as NSString).substring(with: bulletMatch.range(at: 1))
+                let markerAndSpace = (lineText as NSString).substring(with: bulletMatch.range(at: 1))
                 let content = (lineText as NSString).substring(with: bulletMatch.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
 
                 if content.isEmpty {
@@ -516,7 +517,8 @@ struct MarkdownTextView: NSViewRepresentable {
                     textView.didChangeText()
                     return true
                 } else {
-                    let autoInsertText = "\n\(marker) "
+                    // 提取前缀标记（如 "* " 或 "  - "）
+                    let autoInsertText = "\n\(markerAndSpace)"
                     if textView.shouldChangeText(in: selectedRange, replacementString: autoInsertText) {
                         textView.insertText(autoInsertText, replacementRange: selectedRange)
                         textView.didChangeText()

@@ -32,7 +32,7 @@ nonisolated final class MarkdownParser {
 
     private let headingRegex = try! NSRegularExpression(pattern: "^(\\s{0,3})(#{1,6})(?:\\s+|$)(.*)$")
     private let checklistRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[([ xX])\\]\\s*)(.*)$")
-    private let unorderedListRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+)(.*)$")
+    private let unorderedListRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+][ \t]+)(.*)$")
     private let orderedListRegex = try! NSRegularExpression(pattern: "^(\\s*)(\\d+)\\.\\s+(.*)$")
     private let blockquoteRegex = try! NSRegularExpression(pattern: "^(\\s*>\\s?)(.*)$")
     private let footnoteRegex = try! NSRegularExpression(pattern: "^(\\[\\^([^\\]]+)\\]:)\\s*(.*)$")
@@ -785,7 +785,8 @@ nonisolated final class MarkdownParser {
             scalarIndex = nextIndex
         }
 
-        return singleAsterisk != 0 || singleUnderscore != 0 || doubleAsterisk != 0 || doubleUnderscore != 0 || doubleTilde != 0 || doubleEquals != 0 || backticks != 0
+        return text.contains("*") || text.contains("_") || text.contains("~") || text.contains("`") || text.contains("=")
+        // return singleAsterisk != 0 || singleUnderscore != 0 || doubleAsterisk != 0 || doubleUnderscore != 0 || doubleTilde != 0 || doubleEquals != 0 || backticks != 0
     }
 
     private func absoluteRange(_ range: NSRange, base: Int) -> NSRange {

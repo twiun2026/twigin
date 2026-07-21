@@ -18,7 +18,6 @@ final class MarkdownRenderer {
         .foregroundColor,
         .backgroundColor,
         .font,
-        .paragraphStyle,
         .strikethroughStyle,
         .strikethroughColor,
         .underlineStyle,
@@ -85,22 +84,38 @@ final class MarkdownRenderer {
     private func makeRenderPlan(document: MarkdownDocument, storageLength: Int) -> RenderPlan {
         if let blockDiff = document.blockDiff, !blockDiff.isEmpty {
             var ranges: [NSRange] = []
-            var blocks: [MarkdownBlock] = []
+            var diffBlocks: [MarkdownBlock] = []
 
             for operation in blockDiff.operations {
                 switch operation {
                 case let .insert(block):
                     ranges.append(clamp(range: block.lineRange, storageLength: storageLength))
-                    blocks.append(block)
+                    diffBlocks.append(block)
                 case let .modify(_, new):
                     ranges.append(clamp(range: new.lineRange, storageLength: storageLength))
-                    blocks.append(new)
+                    diffBlocks.append(new)
                 case let .delete(block):
                     ranges.append(clamp(range: block.lineRange, storageLength: storageLength))
                 }
             }
 
-            return RenderPlan(ranges: mergeRanges(ranges), blocks: blocks)
+            let mergedRanges = mergeRanges(ranges)
+            
+            // document.blocks 优先使用 explicitBlocks（由 renderIncremental 传入的编辑后全量块列表），
+            // 含位移后的后缀复用块，确保 DELETE 操作清空的范围内仍存在的块能被重新渲染。
+            let latestMaterializedBlocks = document.blocks
+            
+            var allAffectedBlocks = diffBlocks
+            for range in mergedRanges {
+                let overlappingBlocks = latestMaterializedBlocks.filter { $0.lineRange.overlaps(range) }
+                for block in overlappingBlocks {
+                    if !allAffectedBlocks.contains(where: { $0.id == block.id }) {
+                        allAffectedBlocks.append(block)
+                    }
+                }
+            }
+
+            return RenderPlan(ranges: mergedRanges, blocks: allAffectedBlocks)
         }
 
         let applyRange = clampedApplyRange(for: document, storageLength: storageLength)
@@ -263,7 +278,7 @@ final class MarkdownRenderer {
         paragraph.textBlocks = [textBlock]
         paragraph.paragraphSpacing = 4
         applySpacing(to: paragraph, default: 2)
-        attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
+        applyParagraphStyle(paragraph, lineRange: line, to: attributed)
 
         applyInline(inlines, to: attributed, theme: theme)
     }
@@ -293,7 +308,7 @@ final class MarkdownRenderer {
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 6
         applySpacing(to: paragraph, default: 2)
-        attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
+        applyParagraphStyle(paragraph, lineRange: line, to: attributed)
     }
 
     private func applyParagraph(
@@ -309,7 +324,7 @@ final class MarkdownRenderer {
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 4
         applySpacing(to: paragraph, default: 2)
-        attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
+        applyParagraphStyle(paragraph, lineRange: line, to: attributed)
 
         applyInline(inlines, to: attributed, theme: theme)
     }
@@ -350,7 +365,7 @@ final class MarkdownRenderer {
         paragraph.headIndent = 24
         paragraph.paragraphSpacing = 3
         applySpacing(to: paragraph, default: 1)
-        attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
+        applyParagraphStyle(paragraph, lineRange: line, to: attributed)
 
         applyInline(inlines, to: attributed, theme: theme)
     }
@@ -373,7 +388,7 @@ final class MarkdownRenderer {
 
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 6
-        attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
+        applyParagraphStyle(paragraph, lineRange: line, to: attributed)
     }
 
     private func applyListBlock(
@@ -404,7 +419,7 @@ final class MarkdownRenderer {
         paragraph.headIndent = indent
         paragraph.paragraphSpacing = 3
         applySpacing(to: paragraph, default: 1)
-        attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
+        applyParagraphStyle(paragraph, lineRange: line, to: attributed)
 
         applyInline(inlines, to: attributed, theme: theme)
     }
@@ -425,7 +440,17 @@ final class MarkdownRenderer {
         let paragraph = NSMutableParagraphStyle()
         paragraph.paragraphSpacing = 4
         applySpacing(to: paragraph, default: 1)
-        attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
+        applyParagraphStyle(paragraph, lineRange: line, to: attributed)
+    }
+
+    private func applyParagraphStyle(_ paragraph: NSParagraphStyle, lineRange: NSRange, to attributed: NSMutableAttributedString) {
+        guard let line = safeRange(lineRange, in: attributed) else { return }
+        
+        // 如果 lineRange 后面紧跟换行符 \n，将段落样式延伸 1 个字符覆盖该 \n，确保 TextKit 2 的 Fragment 几何不塌陷
+        let needsExtend = (line.location + line.length < attributed.length)
+        let length = needsExtend ? line.length + 1 : line.length
+        let fullRange = NSRange(location: line.location, length: length)
+        attributed.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
     }
 
     private func applyInline(_ inlines: [MarkdownInline], to attributed: NSMutableAttributedString, theme: AppTheme) {

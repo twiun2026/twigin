@@ -6,6 +6,7 @@ import Foundation
 struct MarkdownEditResult: Sendable {
     let affectedRange: NSRange?
     let blockDiff: MarkdownBlockDiff?
+    let allBlocks: [MarkdownBlock]  // 编辑后全量 blocks（含位移后的后缀复用块），供增量渲染兜底
     let source: String     // 后台由影子缓冲物化，主线程仅做 O(1) 的 CoW 赋值给绑定
     let serial: UInt64     // 编辑序号，用于主线程做 coalescing / 陈旧丢弃
     let textLength: Int    // 解析时文本长度，range 安全性校验
@@ -67,6 +68,7 @@ nonisolated final class MarkdownParsingEngine: @unchecked Sendable {
             completion(MarkdownEditResult(
                 affectedRange: doc.affectedRange,
                 blockDiff: doc.blockDiff,
+                allBlocks: self.state.lineStore.materializedBlocks(),
                 source: src,
                 serial: serial,
                 textLength: (src as NSString).length
