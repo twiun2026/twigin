@@ -27,6 +27,7 @@
 /* Begin PBXFileReference section */
 		AA8D0DF23005C7D60048C2EA /* CLAUDE.md */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLAUDE.md; sourceTree = "<group>"; };
 		AAA1B64530040D1600663FB1 /* twigin.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = twigin.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AAB508533013E82800B5B43C /* FoundationModels.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FoundationModels.framework; path = System/Library/Frameworks/FoundationModels.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -53,6 +54,7 @@
 		AA918FAB30042D5D00DFE9DF /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				AAB508533013E82800B5B43C /* FoundationModels.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -308,7 +310,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.grice.twigin;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -350,7 +352,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MACOSX_DEPLOYMENT_TARGET = 15.6;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.grice.twigin;
 				PRODUCT_NAME = "$(TARGET_NAME)";

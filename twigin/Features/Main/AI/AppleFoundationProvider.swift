@@ -10,7 +10,6 @@ import FoundationModels
 ///
 /// This type is decoupled from any editor, view, or Markdown renderer.
 /// It operates purely on `AIRequest` inputs and raw text outputs.
-@available(macOS 26.0, *)
 public final class AppleFoundationProvider: AIProvider {
 
     // MARK: - Properties

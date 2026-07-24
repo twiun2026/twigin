@@ -166,7 +166,11 @@ struct MarkdownTextView: NSViewRepresentable {
         private var needsFullCatchup = false
         private var isLoadingContent = false
         var suppressStringSync = false
-
+        
+        private let aiParser = AICommandParser()
+        private let aiService = AIService(provider: AppleFoundationProvider())
+        private var aiTask: Task<Void, Never>?
+        
         init(parent: MarkdownTextView) {
             self.parent = parent
         }
@@ -307,7 +311,7 @@ struct MarkdownTextView: NSViewRepresentable {
         // 源与偏移保持 1:1 不变。直接由“当前显示文本”驱动，不依赖后台异步渲染时序，
         // 也不使用 view provider（其 loadView 在委托替换段落里不会被可靠触发），
         // 改用图片附件由布局直接绘制，保证复选框稳定可见。
-                static let checklistDisplayRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[([ xX])\\]\\s*)(.*)$")
+        static let checklistDisplayRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[([ xX])\\]\\s*)(.*)$")
         static let imageDisplayRegex = try! NSRegularExpression(pattern: "^!\\[([^\\]]*)\\]\\(([^\\)]+)\\)$")
 
         private var checkboxAttachmentCache: [Bool: NSTextAttachment] = [:]
@@ -495,6 +499,24 @@ struct MarkdownTextView: NSViewRepresentable {
             let nsString = textView.string as NSString
             let lineRange = nsString.lineRange(for: selectedRange)
             let lineText = nsString.substring(with: lineRange)
+            
+            if let aiRequest = aiParser.parse(lineText) {
+                // 匹配成功！代表用户输入了 ai::xxx 并按下了回车
+                
+                // a. 换行，为 AI 输出的内容预留空间
+                let autoInsertText = "\n"
+                if textView.shouldChangeText(in: selectedRange, replacementString: autoInsertText) {
+                    textView.insertText(autoInsertText, replacementRange: selectedRange)
+                    textView.didChangeText()
+                }
+                
+                // b. 将解析出来的 AIRequest 提交给 AIService 异步执行
+                handleAIRequest(aiRequest, targetTextView: textView)
+                
+                // 返回 true 告诉系统我们已自行处理该 Return 事件，防止插入多余的换行
+                return true
+            }
+            
             // Checkbox
             if let checklistMatch = try? NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[[ xX]\\]\\s*)(.*)$")
                     .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
@@ -588,6 +610,56 @@ struct MarkdownTextView: NSViewRepresentable {
 
             return false
         }
+        
+        // MARK: - AI Handling
+        private func handleAIRequest(_ request: AIRequest, targetTextView: NSTextView) {
+            aiTask?.cancel()
+            print("[AI] 正在请求 AI 生成 Markdown",request)
+            aiTask = Task { @MainActor [weak self, weak targetTextView] in
+                guard let self = self, let textView = targetTextView else { return }
+                
+                // 调用 AIService 拿到流式事件流
+                let eventStream = await self.aiService.execute(request: request)
+                
+                do {
+                    for try await event in eventStream {
+                        switch event {
+                        case .started:
+                            // 可在此处更新 UI 状态，例如显示 "AI 思考中..." 占位符
+                            break
+                            
+                        case .chunk(let textChunk):
+                            // 接收到 incremental Markdown text，实时插入到当前光标位置
+                            let currentInsertionPoint = textView.selectedRange()
+                            if textView.shouldChangeText(in: currentInsertionPoint, replacementString: textChunk) {
+                                textView.textStorage?.replaceCharacters(in: currentInsertionPoint, with: textChunk)
+                                
+                                // 将光标移到新插入文本的末尾
+                                let newLocation = currentInsertionPoint.location + (textChunk as NSString).length
+                                textView.setSelectedRange(NSRange(location: newLocation, length: 0))
+                                
+                                textView.didChangeText()
+                            }
+                            
+                        case .completed:
+                            // 流处理完成
+                            break
+                            
+                        case .cancelled:
+                            // 请求被取消
+                            break
+                            
+                        case .failed(let error):
+                            // 弹出提示或在编辑器中输出错误信息
+                            print("AI 执行失败: \(error.localizedDescription)")
+                        }
+                    }
+                } catch {
+                    print("流读取异常: \(error)")
+                }
+            }
+        }
+        
     }
 }
 
