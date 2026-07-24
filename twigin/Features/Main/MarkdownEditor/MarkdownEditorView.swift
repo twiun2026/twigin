@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct MarkdownEditorView: View {
     @Binding var text: String
@@ -306,15 +307,12 @@ struct MarkdownTextView: NSViewRepresentable {
         // 源与偏移保持 1:1 不变。直接由“当前显示文本”驱动，不依赖后台异步渲染时序，
         // 也不使用 view provider（其 loadView 在委托替换段落里不会被可靠触发），
         // 改用图片附件由布局直接绘制，保证复选框稳定可见。
-        static let checklistDisplayRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[([ xX])\\]\\s*)(.*)$")
+                static let checklistDisplayRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[([ xX])\\]\\s*)(.*)$")
+        static let imageDisplayRegex = try! NSRegularExpression(pattern: "^!\\[([^\\]]*)\\]\\(([^\\)]+)\\)$")
 
-        // 复选框附件按 isChecked 缓存并复用同一实例——附件属性值稳定不变，
-        // TextKit2 才不会在每次编辑重排时重新测量附件，从而消除后续文字抖动。
-        // 缓存随“主题 + 正文字体度量”失效（不同字体行框不同，附件尺寸需重算）。
         private var checkboxAttachmentCache: [Bool: NSTextAttachment] = [:]
         private var checkboxThemeKey: AppTheme?
         private var checkboxFontKey: String = ""
-
         private func checkboxAttachment(isChecked: Bool, font: NSFont) -> NSTextAttachment {
             let fontKey = "\(font.fontName):\(font.pointSize)"
             if checkboxThemeKey != parent.theme || checkboxFontKey != fontKey {
@@ -326,59 +324,77 @@ struct MarkdownTextView: NSViewRepresentable {
             let color = NSColor(isChecked ? parent.theme.textMain : parent.theme.textMuted)
             let attachment = NSTextAttachment()
             attachment.image = CheckboxImageFactory.make(isChecked: isChecked, color: color)
-            // 让附件 footprint 严格落在正文字体 ascent/descent 的【内部】（上下各内缩 inset），
-            // 绝不与文字“平局”共同决定行高。这样含复选框的行，其自然行高/基线与普通段落完全一致，
-            // 行高（= 自然行高 × lineHeightMultiple 的小数值）不再因附件参与而取整抖动。
             let inset: CGFloat = 1
-            let top = font.ascender - inset          // < ascender
-            let bottom = font.descender + inset       // > descender
+            let top = font.ascender - inset
+            let bottom = font.descender + inset
             let side = max(1, top - bottom)
             attachment.bounds = CGRect(x: 0, y: bottom, width: side, height: side)
             checkboxAttachmentCache[isChecked] = attachment
             return attachment
         }
-
         func textContentStorage(_ textContentStorage: NSTextContentStorage, textParagraphWith range: NSRange) -> NSTextParagraph? {
             guard let backing = textContentStorage.textStorage else { return nil }
             let paragraph = backing.attributedSubstring(from: range)
             let ns = paragraph.string as NSString
+            let fullRange = NSRange(location: 0, length: ns.length)
 
-            guard let match = Coordinator.checklistDisplayRegex.firstMatch(
-                in: paragraph.string,
-                range: NSRange(location: 0, length: ns.length)
-            ) else { return nil }
+            if let match = Coordinator.checklistDisplayRegex.firstMatch(in: paragraph.string, range: fullRange) {
+                let markerRange = match.range(at: 1)
+                guard markerRange.length >= 1 else { return nil }
+                let checkChar = ns.substring(with: match.range(at: 2))
+                let isChecked = checkChar.lowercased() == "x"
 
-            let markerRange = match.range(at: 1)
-            guard markerRange.length >= 1 else { return nil }
-            let checkChar = ns.substring(with: match.range(at: 2))
-            let isChecked = checkChar.lowercased() == "x"
+                let display = NSMutableAttributedString(attributedString: paragraph)
+                let bodyFont = (textView?.font) ?? NSFont.systemFont(ofSize: 14)
+                let attachment = checkboxAttachment(isChecked: isChecked, font: bodyFont)
 
-            let display = NSMutableAttributedString(attributedString: paragraph)
+                let firstCharRange = NSRange(location: markerRange.location, length: 1)
+                var firstAttrs = paragraph.attributes(at: firstCharRange.location, effectiveRange: nil)
+                firstAttrs[.attachment] = attachment
+                firstAttrs[.foregroundColor] = NSColor.clear
+                firstAttrs[.font] = bodyFont
+                display.replaceCharacters(in: firstCharRange, with: NSAttributedString(string: "\u{FFFC}", attributes: firstAttrs))
 
-            // 正文实际字体：整行（载体字符 + 附件度量）统一用它，避免同一行混用两套字体度量。
-            let bodyFont = (textView?.font) ?? NSFont.systemFont(ofSize: 14)
-
-            // 复选框图片附件（内联绘制，稳定可见）；复用缓存实例避免每帧重测导致抖动。
-            let attachment = checkboxAttachment(isChecked: isChecked, font: bodyFont)
-
-            let firstCharRange = NSRange(location: markerRange.location, length: 1)
-            var firstAttrs = paragraph.attributes(at: firstCharRange.location, effectiveRange: nil)
-            firstAttrs[.attachment] = attachment
-            firstAttrs[.foregroundColor] = NSColor.clear
-            // 关键：载体字符用正文字体（不继承 backing 的 1pt），与附件度量一致，行框单一稳定。
-            firstAttrs[.font] = bodyFont
-            display.replaceCharacters(in: firstCharRange, with: NSAttributedString(string: "\u{FFFC}", attributes: firstAttrs))
-
-            // 隐藏标记余下字符（[ ]、空格），保持行长度不变。
-            if markerRange.length > 1 {
-                let hideRange = NSRange(location: markerRange.location + 1, length: markerRange.length - 1)
-                display.addAttributes([
-                    .foregroundColor: NSColor.clear,
-                    .font: NSFont.systemFont(ofSize: 1)
-                ], range: hideRange)
+                if markerRange.length > 1 {
+                    let hideRange = NSRange(location: markerRange.location + 1, length: markerRange.length - 1)
+                    display.addAttributes([
+                        .foregroundColor: NSColor.clear,
+                        .font: NSFont.systemFont(ofSize: 1)
+                    ], range: hideRange)
+                }
+                return NSTextParagraph(attributedString: display)
+            }
+            
+            if let match = Coordinator.imageDisplayRegex.firstMatch(in: paragraph.string, range: fullRange) {
+                let alt = ns.substring(with: match.range(at: 1))
+                let path = ns.substring(with: match.range(at: 2))
+                
+                let display = NSMutableAttributedString(attributedString: paragraph)
+                let bodyFont = (textView?.font) ?? NSFont.systemFont(ofSize: 14)
+                
+                let attachment = MarkdownImageAttachment(
+                    sourcePath: path,
+                    alt: alt,
+                    lineRange: range,
+                    onTap: { [weak self] p in
+                        let fileURL = URL(fileURLWithPath: (p as NSString).expandingTildeInPath)
+                        NSWorkspace.shared.open(fileURL)
+                    }
+                )
+                
+                // 关键点 5：把整个匹配到的 ![image](path) 范围彻底替换为单个 \u{FFFC} 占位符
+                let matchRange = match.range(at: 0)
+                
+                let attachmentString = NSMutableAttributedString(attachment: attachment)
+                // 赋予段落基本样式，防止行高测量失效
+                attachmentString.addAttribute(.font, value: bodyFont, range: NSRange(location: 0, length: attachmentString.length))
+                
+                display.replaceCharacters(in: matchRange, with: attachmentString)
+                
+                return NSTextParagraph(attributedString: display)
             }
 
-            return NSTextParagraph(attributedString: display)
+            return nil
         }
 
         // 点击命中：把点击处的字符下标映射到 markdown 源行，若为 checklist 且点在标记区内则切换。
@@ -576,7 +592,7 @@ struct MarkdownTextView: NSViewRepresentable {
 }
 
 final class MarkdownNativeTextView: NSTextView {
-    // 返回 true 表示该次点击命中复选框并已处理，不再走默认光标定位。
+    // è¿”å›ž true è¡¨ç¤ºè¯¥æ¬¡ç‚¹å‡»å‘½ä¸­å¤é€‰æ¡†å¹¶å·²å¤„çï¼Œä¸å†èµ°é»˜è®¤å…‰æ ‡å®šä½ã€‚
     var onCheckboxClick: ((Int) -> Bool)?
 
     override func mouseDown(with event: NSEvent) {
@@ -586,5 +602,58 @@ final class MarkdownNativeTextView: NSTextView {
             return
         }
         super.mouseDown(with: event)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let pboard = sender.draggingPasteboard
+        if let urls = pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            var imageMarkdown = ""
+            for url in urls {
+                if isImageURL(url) {
+                    imageMarkdown += "![image](\(url.path))\n"
+                }
+            }
+            if !imageMarkdown.isEmpty {
+                let point = convert(sender.draggingLocation, from: nil)
+                let index = characterIndexForInsertion(at: point)
+                if shouldChangeText(in: NSRange(location: index, length: 0), replacementString: imageMarkdown) {
+                    textStorage?.replaceCharacters(in: NSRange(location: index, length: 0), with: imageMarkdown)
+                    didChangeText()
+                    print(" 拖拽生成 Markdown 图片语法:\n\(imageMarkdown)")
+                }
+                return true
+            }
+        }
+        return super.performDragOperation(sender)
+    }
+
+    override func paste(_ sender: Any?) {
+        let pboard = NSPasteboard.general
+        if let urls = pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            var imageMarkdown = ""
+            for url in urls {
+                if isImageURL(url) {
+                    imageMarkdown += "![image](\(url.path))\n"
+                }
+            }
+            if !imageMarkdown.isEmpty {
+                let range = selectedRange()
+                if shouldChangeText(in: range, replacementString: imageMarkdown) {
+                    textStorage?.replaceCharacters(in: range, with: imageMarkdown)
+                    didChangeText()
+                }
+                return
+            }
+        }
+        super.paste(sender)
+    }
+
+    private func isImageURL(_ url: URL) -> Bool {
+        if let type = try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier,
+           let utType = UTType(type) {
+            return utType.conforms(to: .image)
+        }
+        let ext = url.pathExtension.lowercased()
+        return ["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp"].contains(ext)
     }
 }

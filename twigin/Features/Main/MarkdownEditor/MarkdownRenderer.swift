@@ -217,7 +217,7 @@ final class MarkdownRenderer {
             applyChecklist(marker: marker, markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, theme: theme, context: context)
 
         case let .image(_, path):
-            applyImageLine(path: path, lineRange: block.lineRange, to: attributed, theme: theme)
+            applyImageAttachment(path: path, lineRange: block.lineRange, to: attributed, theme: theme, context: context)
 
         case .bulletList:
             guard let markerRange = block.markerRange,
@@ -238,7 +238,7 @@ final class MarkdownRenderer {
             applyCodeBlock(lineRange: block.lineRange, to: attributed, theme: theme)
         case .footnote(label: _):
             guard let markerRange = block.markerRange,
-                  let contentRange = block.contentRange else { return }
+                  let _ = block.contentRange else { return }
             attributed.addAttributes([
                 .foregroundColor: NSColor(theme.textSecondary)
             ], range: markerRange)
@@ -370,24 +370,34 @@ final class MarkdownRenderer {
         applyInline(inlines, to: attributed, theme: theme)
     }
 
-    private func applyImageLine(
+    private func applyImageAttachment(
         path: String,
         lineRange: NSRange,
         to attributed: NSMutableAttributedString,
-        theme: AppTheme
+        theme: AppTheme,
+        context: MarkdownRenderContext
     ) {
         guard let line = safeRange(lineRange, in: attributed) else { return }
-
+        
+        // 检查当前 range 内是否已经挂载了 MarkdownImageAttachment
+        attributed.enumerateAttribute(.attachment, in: line, options: []) { value, range, _ in
+            if let attachment = value as? MarkdownImageAttachment {
+                // 如果 attachment.bounds 为 .zero（初始状态），可以给它设置一个合理的默认 bounds
+                if attachment.bounds == .zero {
+                    attachment.bounds = CGRect(x: 0, y: 0, width: 300, height: 200)
+                }
+            }
+        }
+        
         attributed.addAttributes([
-            .foregroundColor: NSColor(theme.textCitation),
-            .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular),
-            .underlineStyle: NSUnderlineStyle.single.rawValue,
-            .underlineColor: NSColor(theme.borderLine),
-            .link: path
+            .foregroundColor: NSColor.clear,
+            .font: NSFont.systemFont(ofSize: 1)
         ], range: line)
 
         let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
         paragraph.paragraphSpacing = 6
+        applySpacing(to: paragraph, default: 2)
         applyParagraphStyle(paragraph, lineRange: line, to: attributed)
     }
 

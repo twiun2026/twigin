@@ -570,6 +570,7 @@ nonisolated final class MarkdownParser {
                 contentRange: line.range,
                 inlines: []
             )
+            print(" 解析器识别到图片 Block: alt=\(alt), path=\(path)")
             return makeLineState(
                 line: line,
                 incomingState: incomingState,
