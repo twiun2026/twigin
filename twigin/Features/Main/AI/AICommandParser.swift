@@ -17,26 +17,47 @@ public protocol CommandMatcher: Sendable {
 
 // MARK: - PrefixCommandMatcher
 
-/// Matches lines that start with a fixed prefix followed by the prompt text.
-///
-/// Example: prefix `"ai::"`, line `"ai::What is Swift?"` → `.ask` request.
+/// Example: line `"   Ai::What is Swift?"` → `.ask` request with prompt `"What is Swift?"`.
 public struct PrefixCommandMatcher: CommandMatcher {
     private let prefix: String
     private let command: AICommand
 
-    /// - Parameters:
-    ///   - prefix: The literal prefix that triggers this command.
-    ///   - command: The `AICommand` to associate with matched lines.
     public init(prefix: String, command: AICommand) {
-        self.prefix = prefix
+        self.prefix = prefix.lowercased()
         self.command = command
     }
 
     public func match(_ line: String) -> AIRequest? {
-        guard line.hasPrefix(prefix) else { return nil }
-        let prompt = String(line.dropFirst(prefix.count))
+        // 1. 找到第一个非空白字符（空格/Tab）的起点位置
+        guard let firstNonWhitespaceIndex = line.firstIndex(where: { !$0.isWhitespace }) else {
+            return nil
+        }
+        
+        // 从第一个非空白字符开始切片
+        let subSequence = line[firstNonWhitespaceIndex...]
+        
+        // 2. 检查剩余长度是否足够放下一个前缀（例如 "ai::" 长度为 4）
+        guard subSequence.count >= prefix.count else {
+            return nil
+        }
+        
+        // 3. 仅取前 4 个字符（针对这 4 个字符转小写比对）
+        let prefixRangeEnd = subSequence.index(subSequence.startIndex, offsetBy: prefix.count)
+        let actualPrefix = subSequence[..<prefixRangeEnd].lowercased()
+        
+        // 4. 比对：如果这 4 个字符转小写后不是 "ai::"，直接退出返回 nil
+        guard actualPrefix == prefix else {
+            return nil
+        }
+        
+        // 5. 比对成功！截取 4 个字符之后的 Prompt 内容（保留原始大小写）
+        let prompt = String(subSequence[prefixRangeEnd...])
             .trimmingCharacters(in: .whitespaces)
-        guard !prompt.isEmpty else { return nil }
+        
+        guard !prompt.isEmpty else {
+            return nil
+        }
+        
         return AIRequest(command: command, prompt: prompt)
     }
 }

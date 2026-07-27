@@ -13,21 +13,15 @@ import FoundationModels
 public final class AppleFoundationProvider: AIProvider {
 
     // MARK: - Properties
-
-    private let session: LanguageModelSession
-
+    private let instructions: String?
+    
     // MARK: - Initialisation
-
     /// Creates a provider using the system's default language model with optional instructions.
     ///
     /// - Parameter instructions: System-level guidance for the model's behaviour.
     ///   Pass `nil` to use the model with no additional instructions.
     public init(instructions: String? = nil) {
-        if let instructions {
-            self.session = LanguageModelSession(instructions: instructions)
-        } else {
-            self.session = LanguageModelSession()
-        }
+        self.instructions = instructions
         // TODO: Future — accept `[any Tool]` to enable tool calling.
         // TODO: Future — accept a `Transcript` to resume a previous session.
     }
@@ -42,38 +36,43 @@ public final class AppleFoundationProvider: AIProvider {
     /// - Parameter request: The structured AI request.
     /// - Returns: An `AsyncThrowingStream` emitting incremental Markdown text.
     public func stream(request: AIRequest) -> AsyncThrowingStream<String, any Error> {
-        let session = self.session
-        let prompt = buildPrompt(for: request)
+            let prompt = buildPrompt(for: request)
+            let instructions = self.instructions
 
-        return AsyncThrowingStream { continuation in
-            Task {
-                do {
-                    let responseStream = session.streamResponse(to: prompt)
-                    var emittedLength = 0
+            return AsyncThrowingStream { continuation in
+                Task {
+                    do {
+                        // 2. 每次请求时，创建全新的 Session，请求结束自动释放！
+                        let session: LanguageModelSession
+                        if let instructions {
+                            session = LanguageModelSession(instructions: instructions)
+                        } else {
+                            session = LanguageModelSession()
+                        }
 
-                    // TODO: Future — inspect stream for tool-call interjections before forwarding text.
-                    // TODO: Future — support structured output via Generable conformance.
+                        let responseStream = session.streamResponse(to: prompt)
+                        var emittedLength = 0
 
-                    for try await snapshot in responseStream {
-                        let fullText = snapshot.content
-                        guard fullText.count > emittedLength else { continue }
+                        for try await snapshot in responseStream {
+                            let fullText = snapshot.content
+                            guard fullText.count > emittedLength else { continue }
 
-                        let startIndex = fullText.index(
-                            fullText.startIndex,
-                            offsetBy: emittedLength
-                        )
-                        let newChunk = String(fullText[startIndex...])
-                        continuation.yield(newChunk)
-                        emittedLength = fullText.count
+                            let startIndex = fullText.index(
+                                fullText.startIndex,
+                                offsetBy: emittedLength
+                            )
+                            let newChunk = String(fullText[startIndex...])
+                            continuation.yield(newChunk)
+                            emittedLength = fullText.count
+                        }
+
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: Self.mapError(error))
                     }
-
-                    continuation.finish()
-                } catch {
-                    continuation.finish(throwing: Self.mapError(error))
                 }
             }
         }
-    }
 
     // MARK: - Private Helpers
 

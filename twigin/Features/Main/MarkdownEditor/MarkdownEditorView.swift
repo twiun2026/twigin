@@ -171,6 +171,10 @@ struct MarkdownTextView: NSViewRepresentable {
         private let aiService = AIService(provider: AppleFoundationProvider())
         private var aiTask: Task<Void, Never>?
         
+        // 在 Coordinator 内部新增/更新状态变量
+        private var lastSelectedRange: NSRange? = nil
+        private var cachedBlocks: [MarkdownBlock] = [] // 缓存最新的物化块，供光标移动时瞬时查找
+        
         init(parent: MarkdownTextView) {
             self.parent = parent
         }
@@ -429,12 +433,101 @@ struct MarkdownTextView: NSViewRepresentable {
 
         // MARK: NSTextViewDelegate
 
-        func textViewDidChangeSelection(_ notification: Notification) {}
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView = textView, let storage = textView.textStorage else { return }
+            let currentSelectedRange = textView.selectedRange()
+            
+            // 1. 如果光标选区完全未变，直接丢弃
+            if lastSelectedRange == currentSelectedRange { return }
+            
+            let oldRange = lastSelectedRange
+            lastSelectedRange = currentSelectedRange
+            
+            let storageLength = storage.length
+            guard storageLength > 0 else { return }
+            
+            // 对当前选区进行边界防护，防止按 Backspace 删除字符时 Range 超过最新文本长度
+            let safeLocation = min(max(0, currentSelectedRange.location), storageLength)
+            let safeLength = min(currentSelectedRange.length, storageLength - safeLocation)
+            let safeSelectedRange = NSRange(location: safeLocation, length: safeLength)
+            
+            let nsString = storage.string as NSString
+            guard NSMaxRange(safeSelectedRange) <= nsString.length else { return }
+            
+            // 2. 仅计算安全的旧光标行与新光标行
+            let newFullLineRange = nsString.lineRange(for: safeSelectedRange)
+            
+            var oldFullLineRange: NSRange? = nil
+            if let old = oldRange {
+                let safeOldLoc = min(max(0, old.location), storageLength)
+                let safeOldLen = min(old.length, storageLength - safeOldLoc)
+                let safeOldRange = NSRange(location: safeOldLoc, length: safeOldLen)
+                if NSMaxRange(safeOldRange) <= nsString.length {
+                    oldFullLineRange = nsString.lineRange(for: safeOldRange)
+                }
+            }
+            
+            // 3. 如果旧行和新行是同一行，判断该行内是否存在 Markdown 标签，无标签则跳过重绘
+            if let oldLine = oldFullLineRange, oldLine == newFullLineRange {
+                let lineBlocks = cachedBlocks.filter { $0.lineRange.overlaps(newFullLineRange) }
+                let hasInlines = lineBlocks.contains { !$0.inlines.isEmpty || $0.markerRange != nil }
+                if !hasInlines { return }
+            }
+            
+            // 4. 合并受影响的局部 Ranges
+            var affectedRanges: [NSRange] = [newFullLineRange]
+            if let oldLine = oldFullLineRange, oldLine != newFullLineRange {
+                affectedRanges.append(oldLine)
+            }
+            
+            // 5. 执行安全局域增量重绘
+            renderSelectionChange(affectedRanges: affectedRanges)
+        }
+        
+        /// 专门用于处理“光标移动”的纯局域增量重涂方法
+        private func renderSelectionChange(affectedRanges: [NSRange]) {
+            guard let textView = textView, let storage = textView.textStorage else { return }
+            guard !cachedBlocks.isEmpty else { return }
+            
+            renderer.bodyFontName = parent.fontName
+            renderer.lineSpacingMultiplier = parent.lineSpacing
+            
+            let context = makeContext(textView: textView, document: MarkdownDocument(source: "", revision: 0))
+            
+            // 从缓存的 AST Blocks 中提取受到影响的 Blocks
+            let affectedBlocks = cachedBlocks.filter { block in
+                affectedRanges.contains { $0.overlaps(block.lineRange) }
+            }
+            
+            // 利用现有架构中的清空与重新涂抹逻辑
+            storage.beginEditing()
+            for range in affectedRanges {
+                // 清理受影响范围属性
+                for key in [.foregroundColor, .font, .strikethroughStyle, .backgroundColor] as [NSAttributedString.Key] {
+                    storage.removeAttribute(key, range: range)
+                }
+                // 涂抹基础属性
+                storage.addAttributes([
+                    .foregroundColor: NSColor(parent.theme.textMain),
+                    .font: renderer.bodyFont()
+                ], range: range)
+            }
+            
+            // 仅重新 apply 受到影响的 1~2 个 Block
+            for block in affectedBlocks {
+                renderer.applyBlock(block, to: storage, theme: parent.theme, context: context)
+            }
+            storage.endEditing()
+            
+            // 仅使受影响的 fragment 几何失效（触发 TextKit2 局部绘制）
+            renderer.invalidateLayout(in: textView, affectedRanges: affectedRanges)
+        }
 
         // MARK: 渲染
 
         private func renderIncremental(affectedRange: NSRange?, blockDiff: MarkdownBlockDiff, allBlocks: [MarkdownBlock]) {
             guard let textView else { return }
+            self.cachedBlocks = allBlocks
             renderer.bodyFontName = parent.fontName
             renderer.lineSpacingMultiplier = parent.lineSpacing
             let document = MarkdownDocument(source: "", affectedRange: affectedRange, blockDiff: blockDiff, revision: 0, explicitBlocks: allBlocks)
@@ -443,6 +536,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
         private func renderFull(blocks: [MarkdownBlock]) {
             guard let textView else { return }
+            self.cachedBlocks = blocks
             renderer.bodyFontName = parent.fontName
             renderer.lineSpacingMultiplier = parent.lineSpacing
             let document = MarkdownDocument(source: "", affectedRange: nil, blockDiff: nil, revision: 0, explicitBlocks: blocks)
@@ -457,6 +551,7 @@ struct MarkdownTextView: NSViewRepresentable {
                 textView: textView,
                 theme: parent.theme,
                 document: document,
+                selectedRange: textView.selectedRange(), // 实时获取 TextView 的选中/光标位置
                 onToggleChecklist: { [weak self] range, isChecked in
                     self?.toggleChecklist(in: range, to: isChecked)
                 },
@@ -493,6 +588,77 @@ struct MarkdownTextView: NSViewRepresentable {
         // MARK: Return key continuation
 
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            //拦截 Backspace (deleteBackward:) 键
+            if commandSelector == #selector(NSResponder.deleteBackward(_:)),
+               let selectedRange = textView.selectedRanges.first?.rangeValue,
+               selectedRange.length == 0 { // 仅在光标点选状态（非选中一段文本）下处理
+                
+                let nsString = textView.string as NSString
+                let lineRange = nsString.lineRange(for: selectedRange)
+                let lineText = nsString.substring(with: lineRange)
+                
+                // 判断当前行是否刚好是仅包含引用符号（例如 "> "、">" 或带缩进的 ">"）的行
+                let trimmedLine = lineText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmedLine == ">" || (trimmedLine.isEmpty && lineText.contains(">")) {
+                    // 检查光标位置：只有当光标已经退到了 > 后面或行首时才触发整行删除
+                    if textView.shouldChangeText(in: lineRange, replacementString: "") {
+                        // 1. 计算【上一行末尾】的准确位置（前移 1 个字符跨过上一行的 \n）
+                        let previousLineEndLocation = max(0, lineRange.location - 1)
+                        // 2. 从 textStorage 中彻底删除整行（包含换行符）
+                        textView.textStorage?.replaceCharacters(in: lineRange, with: "")
+                        // 3. 通知系统文本已变更，触发 AST 解析器更新
+                        textView.didChangeText()
+                        // 4. 在下一个 RunLoop 主线程队列中设置光标，防止被渲染器的刷新覆盖
+                        DispatchQueue.main.async { [weak textView] in
+                            guard let textView = textView else { return }
+                            let safeLocation = min(previousLineEndLocation, (textView.string as NSString).length)
+                            let newRange = NSRange(location: safeLocation, length: 0)
+                            textView.setSelectedRange(newRange)
+                            textView.scrollRangeToVisible(newRange)
+                            print("newRange: \(newRange)   previousLineEndLocation: \(previousLineEndLocation)")
+                        }
+                        
+                        return true // 返回 true 表示已完全接管该 Backspace 事件
+                    }
+                }
+                // 场景 B：> 已被删掉，当前行仅剩换行符，但依然残留着 Blockquote 的段落样式 (textBlocks)
+                if trimmedLine.isEmpty, let storage = textView.textStorage, lineRange.location < storage.length {
+                            var hasTextBlock = false
+                            storage.enumerateAttribute(.paragraphStyle, in: lineRange, options: []) { value, _, stop in
+                                if let style = value as? NSParagraphStyle, !style.textBlocks.isEmpty {
+                                    hasTextBlock = true
+                                    stop.pointee = true
+                                }
+                            }
+                            
+                            if hasTextBlock {
+                                // 1. 清除当前行（包括 \n）上的所有 paragraphStyle，恢复为默认样式
+                                storage.removeAttribute(.paragraphStyle, range: lineRange)
+                                storage.addAttribute(.paragraphStyle, value: NSParagraphStyle.default, range: lineRange)
+                                
+                                // 2. 触发 AST 更新与 Viewport 布局重刷
+                                textView.didChangeText()
+                                
+                                // 3. 异步重刷新 Fragment，确保 Blockquote 灰色背景瞬间消失
+                                DispatchQueue.main.async { [weak textView] in
+                                    guard let textView = textView,
+                                          let textLayoutManager = textView.textLayoutManager,
+                                          let textContentManager = textLayoutManager.textContentManager else { return }
+                                    let docRange = textContentManager.documentRange
+                                    if let start = textContentManager.location(docRange.location, offsetBy: lineRange.location),
+                                       let end = textContentManager.location(start, offsetBy: lineRange.length),
+                                       let textRange = NSTextRange(location: start, end: end) {
+                                        textLayoutManager.invalidateLayout(for: textRange)
+                                    }
+                                    textView.needsLayout = true
+                                    textView.needsDisplay = true
+                                }
+                                return true // 拦截成功，彻底清除 Blockquote 退出引用编辑
+                            }
+                        }
+                
+            }
+        
             guard commandSelector == #selector(NSResponder.insertNewline(_:)),
                   let selectedRange = textView.selectedRanges.first?.rangeValue else { return false }
 
@@ -500,49 +666,56 @@ struct MarkdownTextView: NSViewRepresentable {
             let lineRange = nsString.lineRange(for: selectedRange)
             let lineText = nsString.substring(with: lineRange)
             
+            // 用户输入了 ai::xxx 并按回车
             if let aiRequest = aiParser.parse(lineText) {
-                // 匹配成功！代表用户输入了 ai::xxx 并按下了回车
-                
-                // a. 换行，为 AI 输出的内容预留空间
-                let autoInsertText = "\n"
-                if textView.shouldChangeText(in: selectedRange, replacementString: autoInsertText) {
-                    textView.insertText(autoInsertText, replacementRange: selectedRange)
-                    textView.didChangeText()
-                }
-                
-                // b. 将解析出来的 AIRequest 提交给 AIService 异步执行
-                handleAIRequest(aiRequest, targetTextView: textView)
-                
-                // 返回 true 告诉系统我们已自行处理该 Return 事件，防止插入多余的换行
-                return true
-            }
-            
-            // Checkbox
-            if let checklistMatch = try? NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[[ xX]\\]\\s*)(.*)$")
-                    .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
-                    
-                    let indentAndPrefix = (lineText as NSString).substring(with: checklistMatch.range(at: 1))
-                    let content = (lineText as NSString).substring(with: checklistMatch.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
-
-                    // 如果本行任务列表无内容，回车则取消任务列表格式
-                    if content.isEmpty {
-                        textView.shouldChangeText(in: lineRange, replacementString: "")
-                        textView.textStorage?.replaceCharacters(in: lineRange, with: "")
-                        textView.didChangeText()
-                        return true
-                    } else {
-                        // 提取缩进并补全未勾选的 `- [ ] `
-                        let leadingSpaces = indentAndPrefix.prefix { $0 == " " || $0 == "\t" }
-                        let autoInsertText = "\n\(leadingSpaces)- [ ] "
-                        if textView.shouldChangeText(in: selectedRange, replacementString: autoInsertText) {
-                            textView.insertText(autoInsertText, replacementRange: selectedRange)
-                            textView.didChangeText()
-                            return true
-                        }
+                var lineEndLocation = NSMaxRange(lineRange)
+                if lineEndLocation > lineRange.location {
+                    let lastCharIndex = lineEndLocation - 1
+                    let lastChar = nsString.character(at: lastCharIndex)
+                    if lastChar == 0x000A || lastChar == 0x000D { // \n 或 \r
+                        lineEndLocation -= 1
                     }
                 }
-            // Unordered list
-            // (必须要求 [-*+] 后面跟随至少一个空格或 Tab，符合 CommonMark 列表规范)
+                // 只有当光标精确位于行末时才触发 AI
+                if selectedRange.location == lineEndLocation {
+                    let autoInsertText = "\n\n"
+                    if textView.shouldChangeText(in: selectedRange, replacementString: autoInsertText) {
+                        textView.insertText(autoInsertText, replacementRange: selectedRange)
+                        textView.didChangeText()
+                    }
+                    
+                    // 将解析出来的 AIRequest 提交给 AIService 异步执行
+                    handleAIRequest(aiRequest, targetTextView: textView)
+                    
+                    // 返回 true 告诉系统我们已自行处理该 Return 事件，防止插入多余的换行
+                    return true
+                }
+            }
+            // Checkbox
+            if let checklistMatch = try? NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[[ xX]\\]\\s*)(.*)$")
+                .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
+                
+                let indentAndPrefix = (lineText as NSString).substring(with: checklistMatch.range(at: 1))
+                let content = (lineText as NSString).substring(with: checklistMatch.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // 如果本行任务列表无内容，回车则取消任务列表格式
+                if content.isEmpty {
+                    textView.shouldChangeText(in: lineRange, replacementString: "")
+                    textView.textStorage?.replaceCharacters(in: lineRange, with: "")
+                    textView.didChangeText()
+                    return true
+                } else {
+                    // 提取缩进并补全未勾选的 `- [ ] `
+                    let leadingSpaces = indentAndPrefix.prefix { $0 == " " || $0 == "\t" }
+                    let autoInsertText = "\n\(leadingSpaces)- [ ] "
+                    if textView.shouldChangeText(in: selectedRange, replacementString: autoInsertText) {
+                        textView.insertText(autoInsertText, replacementRange: selectedRange)
+                        textView.didChangeText()
+                        return true
+                    }
+                }
+            }
+            // Unordered list,[-*+] 后面跟随至少一个空格或 Tab，符合 CommonMark 列表规范)
             if let bulletMatch = try? NSRegularExpression(pattern: "^(\\s*[-*+][ \t]+)(.*)$")
                 .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
 
@@ -594,10 +767,15 @@ struct MarkdownTextView: NSViewRepresentable {
                 let content = (lineText as NSString).substring(with: blockquoteMatch.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
 
                 if content.isEmpty {
-                    textView.shouldChangeText(in: lineRange, replacementString: "")
-                    textView.textStorage?.replaceCharacters(in: lineRange, with: "")
-                    textView.didChangeText()
-                    return true
+                    // 获取 marker 占据的字符范围（即 > 和后面的空格）
+                    let markerRangeInLine = blockquoteMatch.range(at: 1)
+                    let absoluteMarkerRange = NSRange(location: lineRange.location + markerRangeInLine.location, length: markerRangeInLine.length)
+                    // 仅删除 marker（如 "> "），保留行尾的 \n，这样这一行就退化为了普通的空行，而不是把整行删掉去污染下一行
+                    if textView.shouldChangeText(in: absoluteMarkerRange, replacementString: "") {
+                        textView.textStorage?.replaceCharacters(in: absoluteMarkerRange, with: "")
+                        textView.didChangeText()
+                        return true
+                    }
                 } else {
                     let autoInsertText = "\n\(marker) "
                     if textView.shouldChangeText(in: selectedRange, replacementString: autoInsertText) {

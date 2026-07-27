@@ -6,6 +6,7 @@ struct MarkdownRenderContext {
     let textView: MarkdownNativeTextView
     let theme: AppTheme
     let document: MarkdownDocument
+    let selectedRange: NSRange?
     let onToggleChecklist: (NSRange, Bool) -> Void
     let onTapImage: (String) -> Void
 }
@@ -23,10 +24,11 @@ final class MarkdownRenderer {
         .underlineStyle,
         .underlineColor,
         .link,
-        .attachment
+        .attachment,
+        .paragraphStyle
     ]
 
-    private func bodyFont(size: CGFloat = 14) -> NSFont {
+    func bodyFont(size: CGFloat = 14) -> NSFont {
         if !bodyFontName.isEmpty, let font = NSFont(name: bodyFontName, size: size) {
             return font
         }
@@ -137,7 +139,7 @@ final class MarkdownRenderer {
         }
     }
 
-    private func invalidateLayout(in textView: MarkdownNativeTextView, affectedRanges: [NSRange]) {
+    func invalidateLayout(in textView: MarkdownNativeTextView, affectedRanges: [NSRange]) {
         guard let textLayoutManager = textView.textLayoutManager,
               let textContentManager = textLayoutManager.textContentManager else {
             return
@@ -145,14 +147,16 @@ final class MarkdownRenderer {
 
         guard !affectedRanges.isEmpty else { return }
         let documentRange = textContentManager.documentRange
-
+        let storageLength = (textView.string as NSString).length
+        
         for affectedRange in affectedRanges {
-            guard affectedRange.length > 0,
-                  let start = textContentManager.location(documentRange.location, offsetBy: affectedRange.location),
-                  let end = textContentManager.location(start, offsetBy: affectedRange.length),
-                  let textRange = NSTextRange(location: start, end: end) else {
-                continue
-            }
+            guard affectedRange.length > 0 else { continue }
+            let extendedLength = min(affectedRange.length + 1, storageLength - affectedRange.location)
+            let safeRange = NSRange(location: affectedRange.location, length: extendedLength)
+            
+            guard let start = textContentManager.location(documentRange.location, offsetBy: safeRange.location),
+                  let end = textContentManager.location(start, offsetBy: safeRange.length),
+                  let textRange = NSTextRange(location: start, end: end) else {continue}
 
             textLayoutManager.invalidateLayout(for: textRange)
         }
@@ -201,15 +205,27 @@ final class MarkdownRenderer {
         return NSRange(location: lowerBound, length: upperBound - lowerBound)
     }
 
-    private func applyBlock(_ block: MarkdownBlock, to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
+    private func shouldShowMarker(_ markerRange: NSRange, selectedRange: NSRange?) -> Bool {
+        guard let selected = selectedRange else { return false }
+        
+        if selected.length == 0 {
+            let location = selected.location
+            // 允许光标在 [location, NSMaxRange] 区间内触发显示
+            return location >= markerRange.location && location <= (NSMaxRange(markerRange) + 1)
+        }
+        
+        return markerRange.overlaps(selected)
+    }
+    
+    func applyBlock(_ block: MarkdownBlock, to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
         switch block.kind {
         case let .heading(level):
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyHeading(level: level, markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, to: attributed, theme: theme)
+            applyHeading(level: level, markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, to: attributed, context: context, theme: theme)
 
         case .paragraph:
-            applyParagraph(lineRange: block.lineRange, inlines: block.inlines, to: attributed, theme: theme)
+            applyParagraph(lineRange: block.lineRange, inlines: block.inlines, to: attributed, context: context, theme: theme)
 
         case let .checklist(marker):
             guard let markerRange = block.markerRange,
@@ -222,17 +238,17 @@ final class MarkdownRenderer {
         case .bulletList:
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyListBlock(markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, theme: theme, indent: 20)
+            applyListBlock(markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, context: context, theme: theme, indent: 20)
 
         case .orderedList:
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyListBlock(markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, theme: theme, indent: 24)
+            applyListBlock(markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, context: context, theme: theme, indent: 24)
 
         case .blockquote:
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyBlockquote(markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, theme: theme)
+            applyBlockquote(markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, context: context, theme: theme)
 
         case .codeBlock:
             applyCodeBlock(lineRange: block.lineRange, to: attributed, theme: theme)
@@ -242,7 +258,7 @@ final class MarkdownRenderer {
             attributed.addAttributes([
                 .foregroundColor: NSColor(theme.textSecondary)
             ], range: markerRange)
-            applyInline(block.inlines, to: attributed, theme: theme)
+            applyInline(block.inlines, to: attributed, theme: theme, context: context)
         }
     }
 
@@ -252,15 +268,20 @@ final class MarkdownRenderer {
         lineRange: NSRange,
         inlines: [MarkdownInline],
         to attributed: NSMutableAttributedString,
+        context: MarkdownRenderContext,
         theme: AppTheme
     ) {
         guard let marker = safeRange(markerRange, in: attributed),
               let content = safeRange(contentRange, in: attributed),
               let line = safeRange(lineRange, in: attributed) else { return }
-
+        
+        let showMarker = shouldShowMarker(lineRange, selectedRange: context.selectedRange)
+        let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
+        let markerFont = showMarker ? NSFont.systemFont(ofSize: 14, weight: .regular) : NSFont.systemFont(ofSize: 0.01)
+        
         attributed.addAttributes([
-            .foregroundColor: NSColor(theme.textMuted),
-            .font: NSFont.systemFont(ofSize: 14, weight: .regular)
+            .foregroundColor: markerColor,
+            .font: markerFont
         ], range: marker)
 
         attributed.addAttributes([
@@ -280,7 +301,7 @@ final class MarkdownRenderer {
         applySpacing(to: paragraph, default: 2)
         applyParagraphStyle(paragraph, lineRange: line, to: attributed)
 
-        applyInline(inlines, to: attributed, theme: theme)
+        applyInline(inlines, to: attributed, theme: theme, context: context)
     }
 
     private func applyHeading(
@@ -289,15 +310,20 @@ final class MarkdownRenderer {
         contentRange: NSRange,
         lineRange: NSRange,
         to attributed: NSMutableAttributedString,
+        context: MarkdownRenderContext,
         theme: AppTheme
     ) {
         guard let marker = safeRange(markerRange, in: attributed),
               let content = safeRange(contentRange, in: attributed),
               let line = safeRange(lineRange, in: attributed) else { return }
 
+        let showMarker = shouldShowMarker(lineRange, selectedRange: context.selectedRange)
+        let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
+        let markerFont = showMarker ? NSFont.systemFont(ofSize: 14, weight: .regular) : NSFont.systemFont(ofSize: 0.01)
+        
         attributed.addAttributes([
-            .foregroundColor: NSColor(theme.textMuted),
-            .font: NSFont.systemFont(ofSize: 14, weight: .regular)
+            .foregroundColor: markerColor,
+            .font: markerFont
         ], range: marker)
 
         attributed.addAttributes([
@@ -315,6 +341,7 @@ final class MarkdownRenderer {
         lineRange: NSRange,
         inlines: [MarkdownInline],
         to attributed: NSMutableAttributedString,
+        context: MarkdownRenderContext,
         theme: AppTheme
     ) {
         guard let line = safeRange(lineRange, in: attributed) else { return }
@@ -326,7 +353,7 @@ final class MarkdownRenderer {
         applySpacing(to: paragraph, default: 2)
         applyParagraphStyle(paragraph, lineRange: line, to: attributed)
 
-        applyInline(inlines, to: attributed, theme: theme)
+        applyInline(inlines, to: attributed, theme: theme, context: context)
     }
 
     private func applyChecklist(
@@ -367,7 +394,7 @@ final class MarkdownRenderer {
         applySpacing(to: paragraph, default: 1)
         applyParagraphStyle(paragraph, lineRange: line, to: attributed)
 
-        applyInline(inlines, to: attributed, theme: theme)
+        applyInline(inlines, to: attributed, theme: theme, context: context)
     }
 
     private func applyImageAttachment(
@@ -407,6 +434,7 @@ final class MarkdownRenderer {
         lineRange: NSRange,
         inlines: [MarkdownInline],
         to attributed: NSMutableAttributedString,
+        context: MarkdownRenderContext,
         theme: AppTheme,
         indent: CGFloat
     ) {
@@ -431,7 +459,7 @@ final class MarkdownRenderer {
         applySpacing(to: paragraph, default: 1)
         applyParagraphStyle(paragraph, lineRange: line, to: attributed)
 
-        applyInline(inlines, to: attributed, theme: theme)
+        applyInline(inlines, to: attributed, theme: theme, context: context)
     }
 
     private func applyCodeBlock(
@@ -455,21 +483,27 @@ final class MarkdownRenderer {
 
     private func applyParagraphStyle(_ paragraph: NSParagraphStyle, lineRange: NSRange, to attributed: NSMutableAttributedString) {
         guard let line = safeRange(lineRange, in: attributed) else { return }
-        
-        // 如果 lineRange 后面紧跟换行符 \n，将段落样式延伸 1 个字符覆盖该 \n，确保 TextKit 2 的 Fragment 几何不塌陷
-        let needsExtend = (line.location + line.length < attributed.length)
-        let length = needsExtend ? line.length + 1 : line.length
-        let fullRange = NSRange(location: line.location, length: length)
-        attributed.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
+        attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
     }
 
-    private func applyInline(_ inlines: [MarkdownInline], to attributed: NSMutableAttributedString, theme: AppTheme) {
+    private func applyInline(_ inlines: [MarkdownInline], to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
         for inline in inlines {
+            // 计算整个 inline 元素的完整范围（从 markerOpen 起到 markerClose 止）
+            let fullInlineRange = NSRange(
+                location: inline.markerOpen.location,
+                length: NSMaxRange(inline.markerClose) - inline.markerOpen.location
+            )
+            
+            // 判断光标是否落在这个 inline 区域内
+            let showMarker = shouldShowMarker(fullInlineRange, selectedRange: context.selectedRange)
+            let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
+            let markerFont = showMarker ? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular) : NSFont.systemFont(ofSize: 0.01)
+
             let markers = inline.markerRanges.compactMap { safeRange($0, in: attributed) }
             for markerRange in markers {
                 attributed.addAttributes([
-                    .foregroundColor: NSColor(theme.textMuted),
-                    .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+                    .foregroundColor: markerColor,
+                    .font: markerFont
                 ], range: markerRange)
             }
 
@@ -536,7 +570,7 @@ final class MarkdownRenderer {
     }
 }
 
-private extension NSRange {
+extension NSRange {
     func overlaps(_ other: NSRange) -> Bool {
         max(location, other.location) <= min(NSMaxRange(self), NSMaxRange(other))
     }
