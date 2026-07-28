@@ -52,7 +52,7 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.blockquoteBarColor = NSColor(theme.textCitation)
         textView.insertionPointColor = NSColor(theme.textMain)
         textView.selectedTextAttributes = selectedTextAttributes(for: theme)
-        textView.font = resolvedFont()
+        textView.font = Self.resolvedFont(for: fontName)
 
         context.coordinator.bind(textView: textView)
         textView.textStorage?.delegate = context.coordinator
@@ -107,7 +107,7 @@ struct MarkdownTextView: NSViewRepresentable {
             // 仅在字体真正变化时重置 textView.font（该 setter 会覆盖全文 font 属性），
             // 随后 rerenderFull 逐段重新涂抹标题/粗体/斜体字体。
             if context.coordinator.lastRenderedFontName != fontName {
-                textView.font = resolvedFont()
+                textView.font = Self.resolvedFont(for: fontName)
             }
             context.coordinator.lastRenderedTheme = theme
             context.coordinator.lastRenderedFontName = fontName
@@ -120,7 +120,7 @@ struct MarkdownTextView: NSViewRepresentable {
         context.coordinator.consumeFocusRequestIfNeeded(focusRequest)
     }
 
-    private func resolvedFont() -> NSFont {
+    nonisolated static func resolvedFont(for fontName: String) -> NSFont {
         let size: CGFloat = 14
         let primaryFont: NSFont
         
@@ -153,7 +153,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
     // MARK: - Coordinator
 
-    final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate, NSTextContentStorageDelegate {
+    @MainActor final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate, NSTextContentStorageDelegate, @unchecked Sendable {
         var parent: MarkdownTextView
         weak var textView: MarkdownNativeTextView?
         var lastRenderedTheme: AppTheme? = nil
@@ -161,7 +161,7 @@ struct MarkdownTextView: NSViewRepresentable {
         var lastRenderedLineSpacing: CGFloat = 0
         private var lastConsumedFocusRequest: UUID?
 
-        private let renderer = MarkdownRenderer()
+        private let renderer: MarkdownRenderer
         // 解析栈全部下沉到后台引擎，Coordinator（主线程）不再持有 parser / documentState。
         private let engine = MarkdownParsingEngine()
 
@@ -172,7 +172,7 @@ struct MarkdownTextView: NSViewRepresentable {
         var suppressStringSync = false
         
         private let aiParser = AICommandParser()
-        private let aiService = AIService(provider: AppleFoundationProvider())
+        private let aiAppleService = AIService(provider: AppleFoundationProvider())
         private var aiTask: Task<Void, Never>?
         
         // 在 Coordinator 内部新增/更新状态变量
@@ -181,6 +181,8 @@ struct MarkdownTextView: NSViewRepresentable {
         
         init(parent: MarkdownTextView) {
             self.parent = parent
+            self.renderer = MarkdownRenderer()
+            super.init()
         }
 
         func bind(textView: MarkdownNativeTextView) {
@@ -205,7 +207,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
         // MARK: 内容装载（初次 / 笔记切换）——走全量解析，不经增量管线
 
-        func setContent(_ text: String, on textView: MarkdownNativeTextView) {
+        @MainActor func setContent(_ text: String, on textView: MarkdownNativeTextView) {
             // 置位屏蔽：programmatic 的整篇 setString 会同步触发 willProcessEditing，
             // 此处跳过增量入队，改由 load() 做一次干净的全量解析 + 全量渲染（含缓存清理）。
             isLoadingContent = true
@@ -268,9 +270,9 @@ struct MarkdownTextView: NSViewRepresentable {
             }
         }
 
-        // MARK: 后台解析结果回到主线程（coalescing + 最小化原子刷新）
+        // MARK: 后台解析结果回到主线程（coalescing + 最小化原子刷新）@MainActor 
 
-        private func onEditResult(_ result: MarkdownEditResult) {
+        @MainActor private func onEditResult(_ result: MarkdownEditResult) {
             guard let textView, let storage = textView.textStorage else { return }
 
             // 陈旧结果丢弃：有更新的编辑在途或文本长度已变，则本次结果作废，
@@ -358,7 +360,7 @@ struct MarkdownTextView: NSViewRepresentable {
                 let isChecked = checkChar.lowercased() == "x"
 
                 let display = NSMutableAttributedString(attributedString: paragraph)
-                let bodyFont = (textView?.font) ?? NSFont.systemFont(ofSize: 14)
+                let bodyFont = MarkdownTextView.resolvedFont(for: parent.fontName)
                 let attachment = checkboxAttachment(isChecked: isChecked, font: bodyFont)
 
                 let firstCharRange = NSRange(location: markerRange.location, length: 1)
@@ -383,7 +385,7 @@ struct MarkdownTextView: NSViewRepresentable {
                 let path = ns.substring(with: match.range(at: 2))
                 
                 let display = NSMutableAttributedString(attributedString: paragraph)
-                let bodyFont = (textView?.font) ?? NSFont.systemFont(ofSize: 14)
+                let bodyFont = MarkdownTextView.resolvedFont(for: parent.fontName)
                 
                 let attachment = MarkdownImageAttachment(
                     sourcePath: path,
@@ -411,7 +413,7 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         // 点击命中：把点击处的字符下标映射到 markdown 源行，若为 checklist 且点在标记区内则切换。
-        func handleCheckboxClick(at index: Int) -> Bool {
+        @MainActor func handleCheckboxClick(at index: Int) -> Bool {
             guard let textView else { return false }
             let ns = textView.string as NSString
             guard ns.length > 0 else { return false }
@@ -438,7 +440,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
         // MARK: NSTextViewDelegate
 
-        func textViewDidChangeSelection(_ notification: Notification) {
+        @MainActor func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView = textView, let storage = textView.textStorage else { return }
             let currentSelectedRange = textView.selectedRange()
             
@@ -490,7 +492,7 @@ struct MarkdownTextView: NSViewRepresentable {
         }
         
         /// 专门用于处理“光标移动”的纯局域增量重涂方法
-        private func renderSelectionChange(affectedRanges: [NSRange]) {
+        @MainActor private func renderSelectionChange(affectedRanges: [NSRange]) {
             guard let textView = textView, let storage = textView.textStorage else { return }
             guard !cachedBlocks.isEmpty else { return }
             
@@ -529,7 +531,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
         // MARK: 渲染
 
-        private func renderIncremental(affectedRange: NSRange?, blockDiff: MarkdownBlockDiff, allBlocks: [MarkdownBlock]) {
+        @MainActor private func renderIncremental(affectedRange: NSRange?, blockDiff: MarkdownBlockDiff, allBlocks: [MarkdownBlock]) {
             guard let textView else { return }
             self.cachedBlocks = allBlocks
             renderer.bodyFontName = parent.fontName
@@ -538,7 +540,7 @@ struct MarkdownTextView: NSViewRepresentable {
             renderer.render(makeContext(textView: textView, document: document))
         }
 
-        private func renderFull(blocks: [MarkdownBlock]) {
+        @MainActor private func renderFull(blocks: [MarkdownBlock]) {
             guard let textView else { return }
             self.cachedBlocks = blocks
             renderer.bodyFontName = parent.fontName
@@ -550,7 +552,7 @@ struct MarkdownTextView: NSViewRepresentable {
             lastRenderedLineSpacing = parent.lineSpacing
         }
 
-        private func makeContext(textView: MarkdownNativeTextView, document: MarkdownDocument) -> MarkdownRenderContext {
+        @MainActor private func makeContext(textView: MarkdownNativeTextView, document: MarkdownDocument) -> MarkdownRenderContext {
             MarkdownRenderContext(
                 textView: textView,
                 theme: parent.theme,
@@ -568,7 +570,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
         // MARK: Checklist toggle
 
-        private func toggleChecklist(in lineRange: NSRange, to isChecked: Bool) {
+        @MainActor private func toggleChecklist(in lineRange: NSRange, to isChecked: Bool) {
             guard let textView else { return }
             let ns = textView.string as NSString
             guard NSMaxRange(lineRange) <= ns.length else { return }
@@ -591,7 +593,7 @@ struct MarkdownTextView: NSViewRepresentable {
 
         // MARK: Return key continuation
 
-        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        @MainActor func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             //拦截 Backspace (deleteBackward:) 键
             if commandSelector == #selector(NSResponder.deleteBackward(_:)),
                let selectedRange = textView.selectedRanges.first?.rangeValue,
@@ -800,7 +802,7 @@ struct MarkdownTextView: NSViewRepresentable {
                 guard let self = self, let textView = targetTextView else { return }
                 
                 // 调用 AIService 拿到流式事件流
-                let eventStream = await self.aiService.execute(request: request)
+                let eventStream = await self.aiAppleService.execute(request: request)
                 
                 do {
                     for try await event in eventStream {

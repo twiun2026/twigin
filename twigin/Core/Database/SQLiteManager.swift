@@ -1,7 +1,7 @@
 import Foundation
 import SQLite // 引入 SQLite.swift
 
-class SQLiteManager {
+final class SQLiteManager: @unchecked Sendable {
     // 1. 单例实例
     static let shared = SQLiteManager()
     

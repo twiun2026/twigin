@@ -11,6 +11,7 @@ struct MarkdownRenderContext {
     let onTapImage: (String) -> Void
 }
 
+@MainActor
 final class MarkdownRenderer {
     var bodyFontName: String = ""
     var lineSpacingMultiplier: CGFloat = 0
