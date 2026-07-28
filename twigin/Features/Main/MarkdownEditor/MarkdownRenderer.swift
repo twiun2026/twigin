@@ -25,7 +25,8 @@ final class MarkdownRenderer {
         .underlineColor,
         .link,
         .attachment,
-        .paragraphStyle
+        .paragraphStyle,
+        .isBlockquote
     ]
 
     func bodyFont(size: CGFloat = 14) -> NSFont {
@@ -261,7 +262,7 @@ final class MarkdownRenderer {
             applyInline(block.inlines, to: attributed, theme: theme, context: context)
         }
     }
-
+    
     private func applyBlockquote(
         markerRange: NSRange,
         contentRange: NSRange,
@@ -271,35 +272,40 @@ final class MarkdownRenderer {
         context: MarkdownRenderContext,
         theme: AppTheme
     ) {
-        guard let marker = safeRange(markerRange, in: attributed),
-              let content = safeRange(contentRange, in: attributed),
-              let line = safeRange(lineRange, in: attributed) else { return }
-        
-        let showMarker = shouldShowMarker(lineRange, selectedRange: context.selectedRange)
-        let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
-        let markerFont = showMarker ? NSFont.systemFont(ofSize: 14, weight: .regular) : NSFont.systemFont(ofSize: 0.01)
-        
-        attributed.addAttributes([
-            .foregroundColor: markerColor,
-            .font: markerFont
-        ], range: marker)
+        // 1. 优先给整行设置引用属性标识（防止 safeRange 失败导致该行丢失 isBlockquote 标记）
+        if let line = safeRange(lineRange, in: attributed) {
+            attributed.addAttribute(.isBlockquote, value: true, range: line)
+            
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.firstLineHeadIndent = 16
+            paragraph.headIndent = 16
+            paragraph.tailIndent = -12
+            paragraph.paragraphSpacingBefore = 2
+            paragraph.paragraphSpacing = 6
 
-        attributed.addAttributes([
-            .foregroundColor: NSColor(theme.textCitation),
-            .font: bodyFont()
-        ], range: content)
+            applySpacing(to: paragraph, default: 2)
+            applyParagraphStyle(paragraph, lineRange: line, to: attributed)
+        }
 
-        let paragraph = NSMutableParagraphStyle()
-        let textBlock = NSTextBlock()
-        textBlock.backgroundColor = NSColor(theme.bgCitation)
-        textBlock.setWidth(8, type: .absoluteValueType, for: .padding)
-        textBlock.setWidth(16, type: .absoluteValueType, for: .margin, edge: .minX)
-        textBlock.setWidth(16, type: .absoluteValueType, for: .margin, edge: .maxX)
-        textBlock.setContentWidth(100, type: .percentageValueType)
-        paragraph.textBlocks = [textBlock]
-        paragraph.paragraphSpacing = 4
-        applySpacing(to: paragraph, default: 2)
-        applyParagraphStyle(paragraph, lineRange: line, to: attributed)
+        // 2. 尝试渲染 marker 符号
+        if let marker = safeRange(markerRange, in: attributed) {
+            let showMarker = shouldShowMarker(lineRange, selectedRange: context.selectedRange)
+            let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
+            let markerFont = bodyFont()
+            
+            attributed.addAttributes([
+                .foregroundColor: markerColor,
+                .font: markerFont
+            ], range: marker)
+        }
+
+        // 3. 尝试渲染 content 文本
+        if let content = safeRange(contentRange, in: attributed) {
+            attributed.addAttributes([
+                .foregroundColor: NSColor(theme.textCitation),
+                .font: bodyFont()
+            ], range: content)
+        }
 
         applyInline(inlines, to: attributed, theme: theme, context: context)
     }
@@ -574,4 +580,9 @@ extension NSRange {
     func overlaps(_ other: NSRange) -> Bool {
         max(location, other.location) <= min(NSMaxRange(self), NSMaxRange(other))
     }
+}
+
+// 定义一个自定义 Key 用于标识引用块属性
+extension NSAttributedString.Key {
+    static let isBlockquote = NSAttributedString.Key("MyCustomBlockquoteKey")
 }

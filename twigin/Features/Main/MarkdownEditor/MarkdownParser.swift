@@ -453,15 +453,28 @@ nonisolated final class MarkdownParser {
         if let match = blockquoteRegex.firstMatch(in: line.text, range: fullRange) {
             let markerLocal = match.range(at: 1)
             let contentLocal = match.range(at: 2)
-            let contentRange = absoluteRange(contentLocal, base: line.range.location)
-            let contentText = nsText.substring(with: contentLocal)
+            
+            // 修复点：添加安全兜底机制，确保计算出来的 Range 严格限制在 line.range 的物理范围内
+            let absMarkerLocation = line.range.location + markerLocal.location
+            let absMarkerLength = min(markerLocal.length, line.range.length - markerLocal.location)
+            let absoluteMarkerRange = NSRange(location: absMarkerLocation, length: max(0, absMarkerLength))
+
+            let absContentLocation = line.range.location + contentLocal.location
+            let absContentLength = min(contentLocal.length, line.range.length - contentLocal.location)
+            let absoluteContentRange = NSRange(location: absContentLocation, length: max(0, absContentLength))
+
+            let contentText = (contentLocal.location != NSNotFound && contentLocal.length > 0)
+                ? nsText.substring(with: contentLocal)
+                : ""
+
             let block = makeBlock(
                 kind: .blockquote,
                 line: line,
-                markerRange: absoluteRange(markerLocal, base: line.range.location),
-                contentRange: contentRange,
-                inlines: parseInlines(in: contentText, baseOffset: contentRange.location)
+                markerRange: absoluteMarkerRange,
+                contentRange: absoluteContentRange,
+                inlines: parseInlines(in: contentText, baseOffset: absoluteContentRange.location)
             )
+            
             return makeLineState(
                 line: line,
                 incomingState: incomingState,

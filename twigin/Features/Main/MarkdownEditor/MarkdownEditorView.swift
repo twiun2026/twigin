@@ -48,8 +48,10 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         textView.backgroundColor = NSColor(theme.bgNoteEditor)
+        textView.blockquoteBackgroundColor = NSColor(theme.bgCitation)
+        textView.blockquoteBarColor = NSColor(theme.textCitation)
         textView.insertionPointColor = NSColor(theme.textMain)
-    textView.selectedTextAttributes = selectedTextAttributes(for: theme)
+        textView.selectedTextAttributes = selectedTextAttributes(for: theme)
         textView.font = resolvedFont()
 
         context.coordinator.bind(textView: textView)
@@ -110,6 +112,8 @@ struct MarkdownTextView: NSViewRepresentable {
             context.coordinator.lastRenderedTheme = theme
             context.coordinator.lastRenderedFontName = fontName
             context.coordinator.lastRenderedLineSpacing = lineSpacing
+            textView.blockquoteBackgroundColor = NSColor(theme.bgCitation)
+            textView.blockquoteBarColor = NSColor(theme.textCitation)
             context.coordinator.rerenderFull()
         }
 
@@ -340,6 +344,7 @@ struct MarkdownTextView: NSViewRepresentable {
             checkboxAttachmentCache[isChecked] = attachment
             return attachment
         }
+        
         func textContentStorage(_ textContentStorage: NSTextContentStorage, textParagraphWith range: NSRange) -> NSTextParagraph? {
             guard let backing = textContentStorage.textStorage else { return nil }
             let paragraph = backing.attributedSubstring(from: range)
@@ -384,7 +389,7 @@ struct MarkdownTextView: NSViewRepresentable {
                     sourcePath: path,
                     alt: alt,
                     lineRange: range,
-                    onTap: { [weak self] p in
+                    onTap: { p in
                         let fileURL = URL(fileURLWithPath: (p as NSString).expandingTildeInPath)
                         NSWorkspace.shared.open(fileURL)
                     }
@@ -402,7 +407,7 @@ struct MarkdownTextView: NSViewRepresentable {
                 return NSTextParagraph(attributedString: display)
             }
 
-            return nil
+            return NSTextParagraph(attributedString: paragraph)
         }
 
         // 点击命中：把点击处的字符下标映射到 markdown 源行，若为 checklist 且点在标记区内则切换。
@@ -503,8 +508,7 @@ struct MarkdownTextView: NSViewRepresentable {
             storage.beginEditing()
             for range in affectedRanges {
                 // 清理受影响范围属性
-                for key in [.foregroundColor, .font, .strikethroughStyle, .backgroundColor] as [NSAttributedString.Key] {
-                    storage.removeAttribute(key, range: range)
+                for key in [.foregroundColor, .font, .strikethroughStyle, .backgroundColor, .isBlockquote] as [NSAttributedString.Key] {                    storage.removeAttribute(key, range: range)
                 }
                 // 涂抹基础属性
                 storage.addAttributes([
@@ -615,7 +619,6 @@ struct MarkdownTextView: NSViewRepresentable {
                             let newRange = NSRange(location: safeLocation, length: 0)
                             textView.setSelectedRange(newRange)
                             textView.scrollRangeToVisible(newRange)
-                            print("newRange: \(newRange)   previousLineEndLocation: \(previousLineEndLocation)")
                         }
                         
                         return true // 返回 true 表示已完全接管该 Backspace 事件
@@ -844,6 +847,72 @@ struct MarkdownTextView: NSViewRepresentable {
 final class MarkdownNativeTextView: NSTextView {
     // è¿”å›ž true è¡¨ç¤ºè¯¥æ¬¡ç‚¹å‡»å‘½ä¸­å¤é€‰æ¡†å¹¶å·²å¤„çï¼Œä¸å†èµ°é»˜è®¤å…‰æ ‡å®šä½ã€‚
     var onCheckboxClick: ((Int) -> Bool)?
+    var blockquoteBackgroundColor: NSColor = .clear
+    var blockquoteBarColor: NSColor = .clear
+
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard blockquoteBackgroundColor != .clear,
+              let tlm = textLayoutManager,
+              let cm = tlm.textContentManager else { return }
+
+        let originX = textContainerOrigin.x
+        let originY = textContainerOrigin.y
+        let viewWidth = bounds.width
+        let bgColor = blockquoteBackgroundColor
+        let barColor = blockquoteBarColor
+
+        // Pass 1: group consecutive blockquote fragments into unified runs.
+        // Enumerating only already-laid-out fragments keeps this O(visible lines).
+        var runs: [CGRect] = []
+        var currentRun: CGRect? = nil
+
+        tlm.enumerateTextLayoutFragments(from: cm.documentRange.location, options: []) { fragment in
+            guard let paragraph = fragment.textElement as? NSTextParagraph else {
+                if let r = currentRun { runs.append(r); currentRun = nil }
+                return true
+            }
+            let attrStr = paragraph.attributedString
+            var isBlockquote = false
+            if attrStr.length > 0 {
+                attrStr.enumerateAttribute(.isBlockquote, in: NSRange(location: 0, length: attrStr.length), options: []) { v, _, stop in
+                    if let b = v as? Bool, b { isBlockquote = true; stop.pointee = true }
+                }
+            }
+            let frame = fragment.layoutFragmentFrame
+            let vf = CGRect(x: frame.origin.x + originX, y: frame.origin.y + originY,
+                            width: frame.width, height: frame.height)
+            if isBlockquote {
+                if let r = currentRun { currentRun = r.union(vf) } else { currentRun = vf }
+            } else {
+                if let r = currentRun { runs.append(r); currentRun = nil }
+            }
+            return true
+        }
+        if let r = currentRun { runs.append(r) }
+
+        // Pass 2: draw each run that intersects the dirty rect.
+        // The CGContext clips to rect automatically, so partial runs draw correctly
+        // (rounded corners only appear at the true start/end of a run).
+        NSGraphicsContext.saveGraphicsState()
+        for run in runs where run.intersects(rect) {
+            let bgRect = CGRect(
+                x: originX + 4,
+                y: run.minY - 8,
+                width: max(viewWidth - originX * 2 - 8, 40),
+                height: max(run.height + 16, 10)
+            )
+            let bgPath = NSBezierPath(roundedRect: bgRect, xRadius: 6, yRadius: 6)
+            bgColor.setFill()
+            bgPath.fill()
+
+            let barRect = CGRect(x: bgRect.minX + 2, y: bgRect.minY + 3, width: 3.5, height: max(bgRect.height - 6, 2))
+            let barPath = NSBezierPath(roundedRect: barRect, xRadius: 1.75, yRadius: 1.75)
+            barColor.setFill()
+            barPath.fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
@@ -907,3 +976,4 @@ final class MarkdownNativeTextView: NSTextView {
         return ["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp"].contains(ext)
     }
 }
+
