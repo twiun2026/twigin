@@ -1,4 +1,5 @@
 import AppKit
+import FoundationModels
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -173,7 +174,9 @@ struct MarkdownTextView: NSViewRepresentable {
         
         private let aiParser = AICommandParser()
         private let aiAppleService = AIService(provider: AppleFoundationProvider())
+        private let aiQWenService = AIService(provider: QWenProvider())
         private var aiTask: Task<Void, Never>?
+        private var contextMenuAITask: Task<Void, Never>?
         
         // 在 Coordinator 内部新增/更新状态变量
         private var lastSelectedRange: NSRange? = nil
@@ -842,7 +845,135 @@ struct MarkdownTextView: NSViewRepresentable {
                 }
             }
         }
-        
+
+        // MARK: - Context Menu AI
+
+        /// Appends AI menu items when text is selected.
+        func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
+            let sel = view.selectedRange()
+            guard sel.length > 0 else { return menu }
+            let ns = view.string as NSString
+            guard NSMaxRange(sel) <= ns.length else { return menu }
+            let selectedText = ns.substring(with: sel)
+            guard !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return menu }
+
+            let insertionPoint = NSMaxRange(sel)
+            menu.addItem(.separator())
+            for (index, title) in ["Translate", "Summarize", "Key Points", "Concise"].enumerated() {
+                let item = NSMenuItem(title: title, action: #selector(handleContextMenuAI(_:)), keyEquivalent: "")
+                item.representedObject = AIMenuAction(index, selectedText, at: insertionPoint)
+                item.target = self
+                menu.addItem(item)
+            }
+            return menu
+        }
+
+        @objc private func handleContextMenuAI(_ sender: NSMenuItem) {
+            guard let action = sender.representedObject as? AIMenuAction,
+                  let textView = textView else { return }
+            contextMenuAITask?.cancel()
+            contextMenuAITask = Task { @MainActor [weak self, weak textView] in
+                guard let self, let textView else { return }
+                await self.executeContextMenuAI(action: action, textView: textView)
+            }
+        }
+
+        private func executeContextMenuAI(action: AIMenuAction, textView: NSTextView) async {
+            // Step 1: Accurate token count via Foundation Models tokenizer (macOS 26.4+).
+            let tokenCount: Int
+            if #available(macOS 26.4, *) {
+                do {
+                    tokenCount = try await SystemLanguageModel.default.tokenCount(for: action.selectedText)
+                } catch {
+                    tokenCount = max(1, action.selectedText.count / 4)
+                }
+            } else {
+                // Fallback: ~4 chars per token for Latin text.
+                tokenCount = max(1, action.selectedText.count / 4)
+            }
+
+            // Step 2: Route to Apple or Qwen and build the complete prompt.
+            let (service, prompt) = routeContextMenuAI(
+                commandIndex: action.commandIndex,
+                selectedText: action.selectedText,
+                tokenCount: tokenCount
+            )
+
+            // Step 3: Insert a blank separator after the selection, then stream.
+            let insertRange = NSRange(location: action.insertionPoint, length: 0)
+            let separator = "\n\n"
+            if textView.shouldChangeText(in: insertRange, replacementString: separator) {
+                textView.textStorage?.replaceCharacters(in: insertRange, with: separator)
+                textView.didChangeText()
+            }
+            let streamStart = NSRange(location: action.insertionPoint + (separator as NSString).length, length: 0)
+            textView.setSelectedRange(streamStart)
+
+            let request = AIRequest(command: .ask, prompt: prompt)
+            let eventStream = await service.execute(request: request)
+            do {
+                for try await event in eventStream {
+                    guard !Task.isCancelled else { break }
+                    if case .chunk(let chunk) = event {
+                        let cur = textView.selectedRange()
+                        if textView.shouldChangeText(in: cur, replacementString: chunk) {
+                            textView.textStorage?.replaceCharacters(in: cur, with: chunk)
+                            textView.setSelectedRange(NSRange(location: cur.location + (chunk as NSString).length, length: 0))
+                            textView.didChangeText()
+                        }
+                    }
+                }
+            } catch {
+                print("[AI Context Menu] Stream error: \(error)")
+            }
+        }
+
+        /// Returns the `AIService` and fully-formed prompt for the given command.
+        ///
+        /// Apple model gets a hard word-limit constraint; Qwen handles larger contexts.
+        private func routeContextMenuAI(commandIndex: Int, selectedText: String, tokenCount: Int) -> (AIService, String) {
+            let wordLimit = 4000 - tokenCount
+            switch commandIndex {
+            case 0: // Translate
+                if tokenCount <= 1900 {
+                    return (aiAppleService, "Translate the following text. MUST reply in no more than \(wordLimit) words:\n\n\(selectedText)")
+                }
+                return (aiQWenService, "Translate the following text to Chinese. Output only the translation:\n\n\(selectedText)")
+            case 1: // Summarize
+                if tokenCount <= 2500 {
+                    return (aiAppleService, "Summarize the following text concisely. MUST reply in no more than \(wordLimit) words:\n\n\(selectedText)")
+                }
+                return (aiQWenService, "Summarize the following text concisely:\n\n\(selectedText)")
+            case 2: // Key Points
+                if tokenCount <= 3000 {
+                    return (aiAppleService, "Extract key points as a bullet list. MUST reply in no more than \(wordLimit) words:\n\n\(selectedText)")
+                }
+                return (aiQWenService, "Extract the key points from the following text as a bullet list:\n\n\(selectedText)")
+            case 3: // Concise
+                if tokenCount <= 2000 {
+                    return (aiAppleService, "Rewrite the following text more concisely. MUST reply in no more than \(wordLimit) words:\n\n\(selectedText)")
+                }
+                return (aiQWenService, "Rewrite the following text more concisely while preserving meaning:\n\n\(selectedText)")
+            default:
+                return (aiAppleService, selectedText)
+            }
+        }
+
+    }
+}
+
+// MARK: - AIMenuAction
+
+/// Carries context menu AI action data through `NSMenuItem.representedObject`.
+private final class AIMenuAction: NSObject {
+    let commandIndex: Int
+    let selectedText: String
+    let insertionPoint: Int
+    init(_ commandIndex: Int, _ selectedText: String, at insertionPoint: Int) {
+        self.commandIndex = commandIndex
+        self.selectedText = selectedText
+        self.insertionPoint = insertionPoint
+        super.init()
     }
 }
 
