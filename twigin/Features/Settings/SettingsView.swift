@@ -112,6 +112,11 @@ struct FontSettingsView: View {
                 Divider()
                     .padding(.vertical, 4)
 
+                FontSizeRow()
+
+                Divider()
+                    .padding(.vertical, 4)
+
                 VStack(spacing: 8) {
                     ForEach(lineSpacings, id: \.self) { value in
                         LineHeightRow(
@@ -164,6 +169,39 @@ struct FontPreviewCard: View {
             )
         }
         .buttonStyle(PlainButtonStyle())
+    }
+}
+
+struct FontSizeRow: View {
+    @EnvironmentObject private var themeManager: ThemeManager
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Font Size")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .frame(width: 70, alignment: .leading)
+            Slider(
+                value: Binding(
+                    get: { themeManager.fontSize },
+                    set: { themeManager.setFontSize($0) }
+                ),
+                in: 10...20,
+                step: 1
+            )
+            TextField(
+                "",
+                value: Binding(
+                    get: { Int(themeManager.fontSize) },
+                    set: { themeManager.setFontSize(max(10, min(20, Double($0)))) }
+                ),
+                format: .number
+            )
+            .textFieldStyle(.plain)
+            .frame(width: 28)
+            .multilineTextAlignment(.trailing)
+        }
+        .padding(.vertical, 4)
     }
 }
 

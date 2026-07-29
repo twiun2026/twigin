@@ -19,6 +19,7 @@ struct NoteEditorView: View {
                     text: $content,
                     theme: themeManager.currentTheme,
                     fontName: themeManager.selectedFontName,
+                    fontSize: CGFloat(themeManager.fontSize),
                     lineSpacing: CGFloat(themeManager.lineSpacing),
                     focusRequest: focusRequest
                 )

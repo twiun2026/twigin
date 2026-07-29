@@ -15,6 +15,7 @@ struct MarkdownRenderContext {
 final class MarkdownRenderer {
     var bodyFontName: String = ""
     var lineSpacingMultiplier: CGFloat = 0
+    var baseFontSize: CGFloat = 14
 
     private let attributesToClear: [NSAttributedString.Key] = [
         .foregroundColor,
@@ -30,11 +31,12 @@ final class MarkdownRenderer {
         .isBlockquote
     ]
 
-    func bodyFont(size: CGFloat = 14) -> NSFont {
-        if !bodyFontName.isEmpty, let font = NSFont(name: bodyFontName, size: size) {
+    func bodyFont(size: CGFloat? = nil) -> NSFont {
+        let s = size ?? baseFontSize
+        if !bodyFontName.isEmpty, let font = NSFont(name: bodyFontName, size: s) {
             return font
         }
-        return NSFont.systemFont(ofSize: size, weight: .regular)
+        return NSFont.systemFont(ofSize: s, weight: .regular)
     }
 
     private func applySpacing(to paragraph: NSMutableParagraphStyle, default defaultSpacing: CGFloat) {
@@ -326,7 +328,7 @@ final class MarkdownRenderer {
 
         let showMarker = shouldShowMarker(lineRange, selectedRange: context.selectedRange)
         let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
-        let markerFont = showMarker ? NSFont.systemFont(ofSize: 14, weight: .regular) : NSFont.systemFont(ofSize: 0.01)
+        let markerFont = showMarker ? NSFont.systemFont(ofSize: baseFontSize, weight: .regular) : NSFont.systemFont(ofSize: 0.01)
         
         attributed.addAttributes([
             .foregroundColor: markerColor,
@@ -386,7 +388,7 @@ final class MarkdownRenderer {
 
         var contentAttributes: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor(theme.textMain),
-            .font: NSFont.systemFont(ofSize: 14, weight: .regular)
+            .font: NSFont.systemFont(ofSize: baseFontSize, weight: .regular)
         ]
         if marker == .checked {
             contentAttributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
@@ -451,7 +453,7 @@ final class MarkdownRenderer {
 
         attributed.addAttributes([
             .foregroundColor: NSColor(theme.textMuted),
-            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+            .font: NSFont.monospacedSystemFont(ofSize: baseFontSize, weight: .regular)
         ], range: marker)
 
         attributed.addAttributes([
@@ -478,7 +480,7 @@ final class MarkdownRenderer {
 
         attributed.addAttributes([
             .foregroundColor: NSColor(theme.textSecondary),
-            .font: NSFont.monospacedSystemFont(ofSize: 13.5, weight: .regular),
+            .font: NSFont.monospacedSystemFont(ofSize: max(10, baseFontSize - 0.5), weight: .regular),
             .backgroundColor: NSColor(theme.bgCitation)
         ], range: line)
 
@@ -504,7 +506,7 @@ final class MarkdownRenderer {
             // 判断光标是否落在这个 inline 区域内
             let showMarker = shouldShowMarker(fullInlineRange, selectedRange: context.selectedRange)
             let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
-            let markerFont = showMarker ? NSFont.monospacedSystemFont(ofSize: 13, weight: .regular) : NSFont.systemFont(ofSize: 0.01)
+            let markerFont = showMarker ? NSFont.monospacedSystemFont(ofSize: max(10, baseFontSize - 1), weight: .regular) : NSFont.systemFont(ofSize: 0.01)
 
             let markers = inline.markerRanges.compactMap { safeRange($0, in: attributed) }
             for markerRange in markers {
@@ -520,14 +522,14 @@ final class MarkdownRenderer {
             case .bold:
                 attributed.addAttributes([
                     .foregroundColor: NSColor(theme.textMain),
-                    .font: NSFont.systemFont(ofSize: 14, weight: .bold)
+                    .font: NSFont.systemFont(ofSize: baseFontSize, weight: .bold)
                 ], range: contentRange)
 
             case .italic:
                 attributed.addAttributes([
                     .foregroundColor: NSColor(theme.textItalic),
                     .font: NSFontManager.shared.convert(
-                        NSFont.systemFont(ofSize: 14, weight: .regular),
+                        NSFont.systemFont(ofSize: baseFontSize, weight: .regular),
                         toHaveTrait: .italicFontMask
                     )
                 ], range: contentRange)
@@ -542,7 +544,7 @@ final class MarkdownRenderer {
             case .code:
                 attributed.addAttributes([
                     .foregroundColor: NSColor(theme.textSecondary),
-                    .font: NSFont.monospacedSystemFont(ofSize: 13.5, weight: .medium),
+                    .font: NSFont.monospacedSystemFont(ofSize: max(10, baseFontSize - 0.5), weight: .medium),
                     .backgroundColor: NSColor(theme.bgCitation)
                 ], range: contentRange)
 
@@ -561,14 +563,10 @@ final class MarkdownRenderer {
     }
 
     private func headingSize(for level: Int) -> CGFloat {
-        switch level {
-        case 1: return 28
-        case 2: return 24
-        case 3: return 20
-        case 4: return 18
-        case 5: return 16
-        default: return 15
-        }
+        // Ratios relative to base 14: H1=28, H2=24, H3=20, H4=18, H5=16, H6=15
+        let ratios: [CGFloat] = [2.0, 12.0/7.0, 10.0/7.0, 9.0/7.0, 8.0/7.0, 15.0/14.0]
+        let idx = max(0, min(level - 1, 5))
+        return (baseFontSize * ratios[idx]).rounded()
     }
 
     private func safeRange(_ range: NSRange, in attributed: NSAttributedString) -> NSRange? {

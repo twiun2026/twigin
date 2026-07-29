@@ -7,6 +7,7 @@ struct MarkdownEditorView: View {
     @Binding var text: String
     var theme: AppTheme
     var fontName: String = ""
+    var fontSize: CGFloat = 14
     var lineSpacing: CGFloat = 0
     var focusRequest: UUID? = nil
 
@@ -15,6 +16,7 @@ struct MarkdownEditorView: View {
             text: $text,
             theme: theme,
             fontName: fontName,
+            fontSize: fontSize,
             lineSpacing: lineSpacing,
             focusRequest: focusRequest
         )
@@ -25,6 +27,7 @@ struct MarkdownTextView: NSViewRepresentable {
     @Binding var text: String
     var theme: AppTheme
     var fontName: String = ""
+    var fontSize: CGFloat = 14
     var lineSpacing: CGFloat = 0
     var focusRequest: UUID? = nil
 
@@ -53,13 +56,14 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.blockquoteBarColor = NSColor(theme.textCitation)
         textView.insertionPointColor = NSColor(theme.textMain)
         textView.selectedTextAttributes = selectedTextAttributes(for: theme)
-        textView.font = Self.resolvedFont(for: fontName)
+        textView.font = Self.resolvedFont(for: fontName, size: fontSize)
 
         context.coordinator.bind(textView: textView)
         textView.textStorage?.delegate = context.coordinator
 
         context.coordinator.lastRenderedTheme = theme
         context.coordinator.lastRenderedFontName = fontName
+        context.coordinator.lastRenderedFontSize = fontSize
         context.coordinator.lastRenderedLineSpacing = lineSpacing
         context.coordinator.setContent(text, on: textView)
         context.coordinator.consumeFocusRequestIfNeeded(focusRequest)
@@ -97,6 +101,7 @@ struct MarkdownTextView: NSViewRepresentable {
         } else if textView.string != text {
             context.coordinator.lastRenderedTheme = theme
             context.coordinator.lastRenderedFontName = fontName
+            context.coordinator.lastRenderedFontSize = fontSize
             context.coordinator.lastRenderedLineSpacing = lineSpacing
             context.coordinator.setContent(text, on: textView)
             return
@@ -104,14 +109,17 @@ struct MarkdownTextView: NSViewRepresentable {
 
         if context.coordinator.lastRenderedTheme != theme
            || context.coordinator.lastRenderedFontName != fontName
+           || context.coordinator.lastRenderedFontSize != fontSize
            || context.coordinator.lastRenderedLineSpacing != lineSpacing {
             // 仅在字体真正变化时重置 textView.font（该 setter 会覆盖全文 font 属性），
             // 随后 rerenderFull 逐段重新涂抹标题/粗体/斜体字体。
-            if context.coordinator.lastRenderedFontName != fontName {
-                textView.font = Self.resolvedFont(for: fontName)
+            if context.coordinator.lastRenderedFontName != fontName
+               || context.coordinator.lastRenderedFontSize != fontSize {
+                textView.font = Self.resolvedFont(for: fontName, size: fontSize)
             }
             context.coordinator.lastRenderedTheme = theme
             context.coordinator.lastRenderedFontName = fontName
+            context.coordinator.lastRenderedFontSize = fontSize
             context.coordinator.lastRenderedLineSpacing = lineSpacing
             textView.blockquoteBackgroundColor = NSColor(theme.bgCitation)
             textView.blockquoteBarColor = NSColor(theme.textCitation)
@@ -121,28 +129,27 @@ struct MarkdownTextView: NSViewRepresentable {
         context.coordinator.consumeFocusRequestIfNeeded(focusRequest)
     }
 
-    nonisolated static func resolvedFont(for fontName: String) -> NSFont {
-        let size: CGFloat = 14
+    nonisolated static func resolvedFont(for fontName: String, size: CGFloat = 14) -> NSFont {
         let primaryFont: NSFont
-        
+
         // 1. 设置主字体（通常在设置中用户选中的英文/等宽字体，即 fontName）
         if !fontName.isEmpty, let font = NSFont(name: fontName, size: size) {
             primaryFont = font
         } else {
             primaryFont = NSFont.systemFont(ofSize: size)
         }
-        
-        // 2. 指定中文默认字体的 Fallback 链（优先使用“苹方-简”）
+
+        // 2. 指定中文默认字体的 Fallback 链（优先使用"苹方-简"）
         let chineseFontNames = ["PingFangSC-Regular", "Heiti SC", "Microsoft YaHei"]
         let fallbackDescriptors = chineseFontNames.compactMap { name -> NSFontDescriptor? in
             return NSFontDescriptor(name: name, size: size)
         }
-        
+
         // 3. 将中文 fallback 链绑定到主字体描述符中
         let cascadedDescriptor = primaryFont.fontDescriptor.addingAttributes([
             .cascadeList: fallbackDescriptors
         ])
-        
+
         return NSFont(descriptor: cascadedDescriptor, size: size) ?? primaryFont
     }
 
@@ -159,6 +166,7 @@ struct MarkdownTextView: NSViewRepresentable {
         weak var textView: MarkdownNativeTextView?
         var lastRenderedTheme: AppTheme? = nil
         var lastRenderedFontName: String = ""
+        var lastRenderedFontSize: CGFloat = 14
         var lastRenderedLineSpacing: CGFloat = 0
         private var lastConsumedFocusRequest: UUID?
 
@@ -259,7 +267,7 @@ struct MarkdownTextView: NSViewRepresentable {
             guard editedMask.contains(.editedCharacters) else { return }
             guard !isLoadingContent else { return }   // 整篇装载由 load() 负责，跳过增量入队
 
-            // 主线程仅做极简记录：读取“极小的插入子串”（O(编辑量)），绝不读取全量字符串。
+            // 主线程仅做极简记录：读取"极小的插入子串"（O(编辑量)），绝不读取全量字符串。
             let inserted = textStorage.attributedSubstring(from: editedRange).string
             editSerial &+= 1
             let serial = editSerial
@@ -316,9 +324,9 @@ struct MarkdownTextView: NSViewRepresentable {
 
         // MARK: NSTextContentStorageDelegate
 
-        // TextKit2 只为“附件字符 U+FFFC”预留版面。这里在“显示层”按正则识别 checklist 行，
+        // TextKit2 只为"附件字符 U+FFFC"预留版面。这里在"显示层"按正则识别 checklist 行，
         // 把标记首字符等长替换为携带图片附件的 U+FFFC，其余标记字符隐藏；后端 markdown
-        // 源与偏移保持 1:1 不变。直接由“当前显示文本”驱动，不依赖后台异步渲染时序，
+        // 源与偏移保持 1:1 不变。直接由"当前显示文本"驱动，不依赖后台异步渲染时序，
         // 也不使用 view provider（其 loadView 在委托替换段落里不会被可靠触发），
         // 改用图片附件由布局直接绘制，保证复选框稳定可见。
 
@@ -394,14 +402,15 @@ struct MarkdownTextView: NSViewRepresentable {
             renderSelectionChange(affectedRanges: affectedRanges)
         }
         
-        /// 专门用于处理“光标移动”的纯局域增量重涂方法
+        /// 专门用于处理"光标移动"的纯局域增量重涂方法
         @MainActor private func renderSelectionChange(affectedRanges: [NSRange]) {
             guard let textView = textView, let storage = textView.textStorage else { return }
             guard !cachedBlocks.isEmpty else { return }
             
             renderer.bodyFontName = parent.fontName
+            renderer.baseFontSize = parent.fontSize
             renderer.lineSpacingMultiplier = parent.lineSpacing
-            
+
             let context = makeContext(textView: textView, document: MarkdownDocument(source: "", revision: 0))
             
             // 从缓存的 AST Blocks 中提取受到影响的 Blocks
@@ -438,6 +447,7 @@ struct MarkdownTextView: NSViewRepresentable {
             guard let textView else { return }
             self.cachedBlocks = allBlocks
             renderer.bodyFontName = parent.fontName
+            renderer.baseFontSize = parent.fontSize
             renderer.lineSpacingMultiplier = parent.lineSpacing
             let document = MarkdownDocument(source: "", affectedRange: affectedRange, blockDiff: blockDiff, revision: 0, explicitBlocks: allBlocks)
             renderer.render(makeContext(textView: textView, document: document))
@@ -447,11 +457,13 @@ struct MarkdownTextView: NSViewRepresentable {
             guard let textView else { return }
             self.cachedBlocks = blocks
             renderer.bodyFontName = parent.fontName
+            renderer.baseFontSize = parent.fontSize
             renderer.lineSpacingMultiplier = parent.lineSpacing
             let document = MarkdownDocument(source: "", affectedRange: nil, blockDiff: nil, revision: 0, explicitBlocks: blocks)
             renderer.render(makeContext(textView: textView, document: document))
             lastRenderedTheme = parent.theme
             lastRenderedFontName = parent.fontName
+            lastRenderedFontSize = parent.fontSize
             lastRenderedLineSpacing = parent.lineSpacing
         }
 
