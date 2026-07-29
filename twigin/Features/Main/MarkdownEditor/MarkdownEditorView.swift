@@ -176,7 +176,7 @@ struct MarkdownTextView: NSViewRepresentable {
         private let aiAppleService = AIService(provider: AppleFoundationProvider())
         private let aiQWenService = AIService(provider: QWenProvider())
         private var aiTask: Task<Void, Never>?
-        private var contextMenuAITask: Task<Void, Never>?
+        var contextMenuAITask: Task<Void, Never>?
         
         // 在 Coordinator 内部新增/更新状态变量
         private var lastSelectedRange: NSRange? = nil
@@ -324,121 +324,27 @@ struct MarkdownTextView: NSViewRepresentable {
         // 源与偏移保持 1:1 不变。直接由“当前显示文本”驱动，不依赖后台异步渲染时序，
         // 也不使用 view provider（其 loadView 在委托替换段落里不会被可靠触发），
         // 改用图片附件由布局直接绘制，保证复选框稳定可见。
-        static let checklistDisplayRegex = try! NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[([ xX])\\]\\s*)(.*)$")
-        static let imageDisplayRegex = try! NSRegularExpression(pattern: "^!\\[([^\\]]*)\\]\\(([^\\)]+)\\)$")
 
-        private var checkboxAttachmentCache: [Bool: NSTextAttachment] = [:]
-        private var checkboxThemeKey: AppTheme?
-        private var checkboxFontKey: String = ""
-        private func checkboxAttachment(isChecked: Bool, font: NSFont) -> NSTextAttachment {
-            let fontKey = "\(font.fontName):\(font.pointSize)"
-            if checkboxThemeKey != parent.theme || checkboxFontKey != fontKey {
-                checkboxAttachmentCache.removeAll()
-                checkboxThemeKey = parent.theme
-                checkboxFontKey = fontKey
-            }
-            if let cached = checkboxAttachmentCache[isChecked] { return cached }
-            let color = NSColor(isChecked ? parent.theme.textMain : parent.theme.textMuted)
-            let attachment = NSTextAttachment()
-            attachment.image = CheckboxImageFactory.make(isChecked: isChecked, color: color)
-            let inset: CGFloat = 1
-            let top = font.ascender - inset
-            let bottom = font.descender + inset
-            let side = max(1, top - bottom)
-            attachment.bounds = CGRect(x: 0, y: bottom, width: side, height: side)
-            checkboxAttachmentCache[isChecked] = attachment
-            return attachment
-        }
+        var checkboxAttachmentCache: [Bool: NSTextAttachment] = [:]
+        var checkboxThemeKey: AppTheme?
+        var checkboxFontKey: String = ""
         
         func textContentStorage(_ textContentStorage: NSTextContentStorage, textParagraphWith range: NSRange) -> NSTextParagraph? {
             guard let backing = textContentStorage.textStorage else { return nil }
             let paragraph = backing.attributedSubstring(from: range)
             let ns = paragraph.string as NSString
-            let fullRange = NSRange(location: 0, length: ns.length)
 
-            if let match = Coordinator.checklistDisplayRegex.firstMatch(in: paragraph.string, range: fullRange) {
-                let markerRange = match.range(at: 1)
-                guard markerRange.length >= 1 else { return nil }
-                let checkChar = ns.substring(with: match.range(at: 2))
-                let isChecked = checkChar.lowercased() == "x"
-
-                let display = NSMutableAttributedString(attributedString: paragraph)
-                let bodyFont = MarkdownTextView.resolvedFont(for: parent.fontName)
-                let attachment = checkboxAttachment(isChecked: isChecked, font: bodyFont)
-
-                let firstCharRange = NSRange(location: markerRange.location, length: 1)
-                var firstAttrs = paragraph.attributes(at: firstCharRange.location, effectiveRange: nil)
-                firstAttrs[.attachment] = attachment
-                firstAttrs[.foregroundColor] = NSColor.clear
-                firstAttrs[.font] = bodyFont
-                display.replaceCharacters(in: firstCharRange, with: NSAttributedString(string: "\u{FFFC}", attributes: firstAttrs))
-
-                if markerRange.length > 1 {
-                    let hideRange = NSRange(location: markerRange.location + 1, length: markerRange.length - 1)
-                    display.addAttributes([
-                        .foregroundColor: NSColor.clear,
-                        .font: NSFont.systemFont(ofSize: 1)
-                    ], range: hideRange)
-                }
-                return NSTextParagraph(attributedString: display)
+            // 1. Checklist 显示转换
+            if let checklistParagraph = processChecklistParagraph(paragraph, range: range, nsString: ns) {
+                return checklistParagraph
             }
             
-            if let match = Coordinator.imageDisplayRegex.firstMatch(in: paragraph.string, range: fullRange) {
-                let alt = ns.substring(with: match.range(at: 1))
-                let path = ns.substring(with: match.range(at: 2))
-                
-                let display = NSMutableAttributedString(attributedString: paragraph)
-                let bodyFont = MarkdownTextView.resolvedFont(for: parent.fontName)
-                
-                let attachment = MarkdownImageAttachment(
-                    sourcePath: path,
-                    alt: alt,
-                    lineRange: range,
-                    onTap: { p in
-                        let fileURL = URL(fileURLWithPath: (p as NSString).expandingTildeInPath)
-                        NSWorkspace.shared.open(fileURL)
-                    }
-                )
-                
-                // 关键点 5：把整个匹配到的 ![image](path) 范围彻底替换为单个 \u{FFFC} 占位符
-                let matchRange = match.range(at: 0)
-                
-                let attachmentString = NSMutableAttributedString(attachment: attachment)
-                // 赋予段落基本样式，防止行高测量失效
-                attachmentString.addAttribute(.font, value: bodyFont, range: NSRange(location: 0, length: attachmentString.length))
-                
-                display.replaceCharacters(in: matchRange, with: attachmentString)
-                
-                return NSTextParagraph(attributedString: display)
+            // 2. 图片显示转换
+            if let imageParagraph = processImageParagraph(in: paragraph, range: range, nsString: ns) {
+                return imageParagraph
             }
 
             return NSTextParagraph(attributedString: paragraph)
-        }
-
-        // 点击命中：把点击处的字符下标映射到 markdown 源行，若为 checklist 且点在标记区内则切换。
-        @MainActor func handleCheckboxClick(at index: Int) -> Bool {
-            guard let textView else { return false }
-            let ns = textView.string as NSString
-            guard ns.length > 0 else { return false }
-
-            let probe = min(max(index, 0), ns.length - 1)
-            let lineRange = ns.lineRange(for: NSRange(location: probe, length: 0))
-            let lineText = ns.substring(with: lineRange)
-            let lineNS = lineText as NSString
-
-            guard let match = Coordinator.checklistDisplayRegex.firstMatch(
-                in: lineText,
-                range: NSRange(location: 0, length: lineNS.length)
-            ) else { return false }
-
-            let markerRange = match.range(at: 1)
-            let markerEnd = lineRange.location + markerRange.length
-            guard index >= lineRange.location, index <= markerEnd else { return false }
-
-            let checkChar = lineNS.substring(with: match.range(at: 2))
-            let newChecked = checkChar.lowercased() != "x"
-            toggleChecklist(in: lineRange, to: newChecked)
-            return true
         }
 
         // MARK: NSTextViewDelegate
@@ -571,29 +477,6 @@ struct MarkdownTextView: NSViewRepresentable {
             )
         }
 
-        // MARK: Checklist toggle
-
-        @MainActor private func toggleChecklist(in lineRange: NSRange, to isChecked: Bool) {
-            guard let textView else { return }
-            let ns = textView.string as NSString
-            guard NSMaxRange(lineRange) <= ns.length else { return }
-
-            let line = ns.substring(with: lineRange)
-            guard let regex = try? NSRegularExpression(pattern: "^\\s*[-*]\\s+\\[( |x|X)\\]", options: []),
-                  let match = regex.firstMatch(in: line, options: [], range: NSRange(location: 0, length: (line as NSString).length)) else {
-                return
-            }
-
-            let markerRange = match.range
-            let replacement = isChecked ? "- [x]" : "- [ ]"
-            let lineNS = line as NSString
-            let updatedLine = lineNS.replacingCharacters(in: markerRange, with: replacement)
-
-            textView.shouldChangeText(in: lineRange, replacementString: updatedLine)
-            textView.textStorage?.replaceCharacters(in: lineRange, with: updatedLine)
-            textView.didChangeText()
-        }
-
         // MARK: Return key continuation
 
         @MainActor func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -631,40 +514,39 @@ struct MarkdownTextView: NSViewRepresentable {
                 }
                 // 场景 B：> 已被删掉，当前行仅剩换行符，但依然残留着 Blockquote 的段落样式 (textBlocks)
                 if trimmedLine.isEmpty, let storage = textView.textStorage, lineRange.location < storage.length {
-                            var hasTextBlock = false
-                            storage.enumerateAttribute(.paragraphStyle, in: lineRange, options: []) { value, _, stop in
-                                if let style = value as? NSParagraphStyle, !style.textBlocks.isEmpty {
-                                    hasTextBlock = true
-                                    stop.pointee = true
-                                }
-                            }
-                            
-                            if hasTextBlock {
-                                // 1. 清除当前行（包括 \n）上的所有 paragraphStyle，恢复为默认样式
-                                storage.removeAttribute(.paragraphStyle, range: lineRange)
-                                storage.addAttribute(.paragraphStyle, value: NSParagraphStyle.default, range: lineRange)
-                                
-                                // 2. 触发 AST 更新与 Viewport 布局重刷
-                                textView.didChangeText()
-                                
-                                // 3. 异步重刷新 Fragment，确保 Blockquote 灰色背景瞬间消失
-                                DispatchQueue.main.async { [weak textView] in
-                                    guard let textView = textView,
-                                          let textLayoutManager = textView.textLayoutManager,
-                                          let textContentManager = textLayoutManager.textContentManager else { return }
-                                    let docRange = textContentManager.documentRange
-                                    if let start = textContentManager.location(docRange.location, offsetBy: lineRange.location),
-                                       let end = textContentManager.location(start, offsetBy: lineRange.length),
-                                       let textRange = NSTextRange(location: start, end: end) {
-                                        textLayoutManager.invalidateLayout(for: textRange)
-                                    }
-                                    textView.needsLayout = true
-                                    textView.needsDisplay = true
-                                }
-                                return true // 拦截成功，彻底清除 Blockquote 退出引用编辑
-                            }
+                    var hasTextBlock = false
+                    storage.enumerateAttribute(.paragraphStyle, in: lineRange, options: []) { value, _, stop in
+                        if let style = value as? NSParagraphStyle, !style.textBlocks.isEmpty {
+                            hasTextBlock = true
+                            stop.pointee = true
                         }
-                
+                    }
+                    
+                    if hasTextBlock {
+                        // 1. 清除当前行（包括 \n）上的所有 paragraphStyle，恢复为默认样式
+                        storage.removeAttribute(.paragraphStyle, range: lineRange)
+                        storage.addAttribute(.paragraphStyle, value: NSParagraphStyle.default, range: lineRange)
+                        
+                        // 2. 触发 AST 更新与 Viewport 布局重刷
+                        textView.didChangeText()
+                        
+                        // 3. 异步重刷新 Fragment，确保 Blockquote 灰色背景瞬间消失
+                        DispatchQueue.main.async { [weak textView] in
+                            guard let textView = textView,
+                                  let textLayoutManager = textView.textLayoutManager,
+                                  let textContentManager = textLayoutManager.textContentManager else { return }
+                            let docRange = textContentManager.documentRange
+                            if let start = textContentManager.location(docRange.location, offsetBy: lineRange.location),
+                               let end = textContentManager.location(start, offsetBy: lineRange.length),
+                               let textRange = NSTextRange(location: start, end: end) {
+                                textLayoutManager.invalidateLayout(for: textRange)
+                            }
+                            textView.needsLayout = true
+                            textView.needsDisplay = true
+                        }
+                        return true // 拦截成功，彻底清除 Blockquote 退出引用编辑
+                    }
+                }
             }
         
             guard commandSelector == #selector(NSResponder.insertNewline(_:)),
@@ -700,28 +582,8 @@ struct MarkdownTextView: NSViewRepresentable {
                 }
             }
             // Checkbox
-            if let checklistMatch = try? NSRegularExpression(pattern: "^(\\s*[-*+]\\s+\\[[ xX]\\]\\s*)(.*)$")
-                .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
-                
-                let indentAndPrefix = (lineText as NSString).substring(with: checklistMatch.range(at: 1))
-                let content = (lineText as NSString).substring(with: checklistMatch.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
-
-                // 如果本行任务列表无内容，回车则取消任务列表格式
-                if content.isEmpty {
-                    textView.shouldChangeText(in: lineRange, replacementString: "")
-                    textView.textStorage?.replaceCharacters(in: lineRange, with: "")
-                    textView.didChangeText()
+            if handleCheckboxNewline(in: lineText, lineRange: lineRange, selectedRange: selectedRange, textView: textView) {
                     return true
-                } else {
-                    // 提取缩进并补全未勾选的 `- [ ] `
-                    let leadingSpaces = indentAndPrefix.prefix { $0 == " " || $0 == "\t" }
-                    let autoInsertText = "\n\(leadingSpaces)- [ ] "
-                    if textView.shouldChangeText(in: selectedRange, replacementString: autoInsertText) {
-                        textView.insertText(autoInsertText, replacementRange: selectedRange)
-                        textView.didChangeText()
-                        return true
-                    }
-                }
             }
             // Unordered list,[-*+] 后面跟随至少一个空格或 Tab，符合 CommonMark 列表规范)
             if let bulletMatch = try? NSRegularExpression(pattern: "^(\\s*[-*+][ \t]+)(.*)$")
@@ -848,95 +710,16 @@ struct MarkdownTextView: NSViewRepresentable {
 
         // MARK: - Context Menu AI
 
-        /// Appends AI menu items when text is selected.
         func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
-            let sel = view.selectedRange()
-            guard sel.length > 0 else { return menu }
-            let ns = view.string as NSString
-            guard NSMaxRange(sel) <= ns.length else { return menu }
-            let selectedText = ns.substring(with: sel)
-            guard !selectedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return menu }
-
-            let insertionPoint = NSMaxRange(sel)
-            menu.addItem(.separator())
-            for (index, title) in ["Translate", "Summarize", "Key Points", "Concise"].enumerated() {
-                let item = NSMenuItem(title: title, action: #selector(handleContextMenuAI(_:)), keyEquivalent: "")
-                item.representedObject = AIMenuAction(index, selectedText, at: insertionPoint)
-                item.target = self
-                menu.addItem(item)
-            }
-            return menu
+            return buildContextMenu(menu, for: view)
         }
 
-        @objc private func handleContextMenuAI(_ sender: NSMenuItem) {
-            guard let action = sender.representedObject as? AIMenuAction,
-                  let textView = textView else { return }
-            contextMenuAITask?.cancel()
-            contextMenuAITask = Task { @MainActor [weak self, weak textView] in
-                guard let self, let textView else { return }
-                await self.executeContextMenuAI(action: action, textView: textView)
-            }
-        }
-
-        private func executeContextMenuAI(action: AIMenuAction, textView: NSTextView) async {
-            // Step 1: Accurate token count via Foundation Models tokenizer (macOS 26.4+).
-            let tokenCount: Int
-            if #available(macOS 26.4, *) {
-                do {
-                    tokenCount = try await SystemLanguageModel.default.tokenCount(for: action.selectedText)
-                } catch {
-                    tokenCount = max(1, action.selectedText.count / 4)
-                }
-            } else {
-                // Fallback: ~4 chars per token for Latin text.
-                tokenCount = max(1, action.selectedText.count / 4)
-            }
-
-            // Step 2: Route to Apple or Qwen and build the complete prompt.
-            let (service, prompt) = routeContextMenuAI(
-                commandIndex: action.commandIndex,
-                selectedText: action.selectedText,
-                tokenCount: tokenCount
-            )
-
-            // Step 3: Insert a blank separator after the selection, then stream.
-            let insertRange = NSRange(location: action.insertionPoint, length: 0)
-            let separator = "\n\n"
-            if textView.shouldChangeText(in: insertRange, replacementString: separator) {
-                textView.textStorage?.replaceCharacters(in: insertRange, with: separator)
-                textView.didChangeText()
-            }
-            let streamStart = NSRange(location: action.insertionPoint + (separator as NSString).length, length: 0)
-            textView.setSelectedRange(streamStart)
-
-            let request = AIRequest(command: .ask, prompt: prompt)
-            let eventStream = await service.execute(request: request)
-            do {
-                for try await event in eventStream {
-                    guard !Task.isCancelled else { break }
-                    if case .chunk(let chunk) = event {
-                        let cur = textView.selectedRange()
-                        if textView.shouldChangeText(in: cur, replacementString: chunk) {
-                            textView.textStorage?.replaceCharacters(in: cur, with: chunk)
-                            textView.setSelectedRange(NSRange(location: cur.location + (chunk as NSString).length, length: 0))
-                            textView.didChangeText()
-                        }
-                    }
-                }
-            } catch {
-                print("[AI Context Menu] Stream error: \(error)")
-            }
-        }
-
-        /// Returns the `AIService` and fully-formed prompt for the given command.
-        ///
-        /// Apple model gets a hard word-limit constraint; Qwen handles larger contexts.
-        private func routeContextMenuAI(commandIndex: Int, selectedText: String, tokenCount: Int) -> (AIService, String) {
+        func routeContextMenuAI(commandIndex: Int, selectedText: String, tokenCount: Int) -> (AIService, String) {
             let wordLimit = 4000 - tokenCount
             switch commandIndex {
             case 0: // Translate
                 if tokenCount <= 1900 {
-                    return (aiAppleService, "Translate the following text. MUST reply in no more than \(wordLimit) words:\n\n\(selectedText)")
+                    return (aiAppleService, "Translate the following text into Chinese. MUST reply in no more than \(wordLimit) words:\n\n\(selectedText)")
                 }
                 return (aiQWenService, "Translate the following text to Chinese. Output only the translation:\n\n\(selectedText)")
             case 1: // Summarize
@@ -962,23 +745,7 @@ struct MarkdownTextView: NSViewRepresentable {
     }
 }
 
-// MARK: - AIMenuAction
-
-/// Carries context menu AI action data through `NSMenuItem.representedObject`.
-private final class AIMenuAction: NSObject {
-    let commandIndex: Int
-    let selectedText: String
-    let insertionPoint: Int
-    init(_ commandIndex: Int, _ selectedText: String, at insertionPoint: Int) {
-        self.commandIndex = commandIndex
-        self.selectedText = selectedText
-        self.insertionPoint = insertionPoint
-        super.init()
-    }
-}
-
 final class MarkdownNativeTextView: NSTextView {
-    // è¿”å›ž true è¡¨ç¤ºè¯¥æ¬¡ç‚¹å‡»å‘½ä¸­å¤é€‰æ¡†å¹¶å·²å¤„çï¼Œä¸å†èµ°é»˜è®¤å…‰æ ‡å®šä½ã€‚
     var onCheckboxClick: ((Int) -> Bool)?
     var blockquoteBackgroundColor: NSColor = .clear
     var blockquoteBarColor: NSColor = .clear
@@ -1098,15 +865,6 @@ final class MarkdownNativeTextView: NSTextView {
             }
         }
         super.paste(sender)
-    }
-
-    private func isImageURL(_ url: URL) -> Bool {
-        if let type = try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier,
-           let utType = UTType(type) {
-            return utType.conforms(to: .image)
-        }
-        let ext = url.pathExtension.lowercased()
-        return ["png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp"].contains(ext)
     }
 }
 
