@@ -53,7 +53,8 @@ public final class QWenProvider: AIProvider {
     public func stream(request: AIRequest) -> AsyncThrowingStream<String, any Error> {
         let config = configuration
         let prompt = buildPrompt(for: request)
-
+        print("[QWenProvider] stream() called! Target model: \(config.model), Endpoint: \(config.endpoint)")
+        print("[QWenProvider] Prompt payload: \(prompt)")
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -62,18 +63,29 @@ public final class QWenProvider: AIProvider {
                     urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     urlRequest.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
 
+                    // 构建更规范的 OpenAI/Ollama 消息数组
+                    var messages: [[String: String]] = []
+                    if let systemPrompt = request.context, !systemPrompt.isEmpty {
+                        // 将指令作为 system 角色发送
+                        messages.append(["role": "system", "content": systemPrompt])
+                        // 将实际需要翻译的文本作为 user 角色发送
+                        messages.append(["role": "user", "content": request.prompt])
+                    } else {
+                        messages.append(["role": "user", "content": request.prompt])
+                    }
                     let body: [String: Any] = [
                         "model": config.model,
                         "stream": true,
-                        "messages": [["role": "user", "content": prompt]]
+                        "messages": messages
                     ]
                     urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
-
+                    print("[QWenProvider] Sending HTTP POST request to Ollama...")
                     let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
 
                     guard let http = response as? HTTPURLResponse else {
                         throw AIProviderError.unavailable("Non-HTTP response received.")
                     }
+                    print("[QWenProvider] HTTP Response Code: \(http.statusCode)")
                     guard (200..<300).contains(http.statusCode) else {
                         throw AIProviderError.unavailable("HTTP \(http.statusCode) from \(config.endpoint.host ?? "endpoint")")
                     }
