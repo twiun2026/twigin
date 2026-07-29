@@ -2,14 +2,9 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
-// MARK: - Image Display Logic (Coordinator Extension)
-
 extension MarkdownTextView.Coordinator {
-    
-    /// 图片 Markdown 匹配正则
     static let imageDisplayRegex = try! NSRegularExpression(pattern: "^!\\[([^\\]]*)\\]\\(([^\\)]+)\\)$")
-
-    /// 尝试将包含图片 Markdown 语法的段落渲染为带有图片附件的 NSTextParagraph
+    
     func processImageParagraph(
         in paragraph: NSAttributedString,
         range: NSRange,
@@ -52,8 +47,51 @@ extension MarkdownTextView.Coordinator {
 // MARK: - Image Drag & Paste Handler (MarkdownNativeTextView Extension)
 
 extension MarkdownNativeTextView {
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        let pboard = sender.draggingPasteboard
+        if let urls = pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            var imageMarkdown = ""
+            for url in urls {
+                if isImageURL(url) {
+                    imageMarkdown += "![image](\(url.path))\n"
+                }
+            }
+            if !imageMarkdown.isEmpty {
+                let point = convert(sender.draggingLocation, from: nil)
+                let index = characterIndexForInsertion(at: point)
+                if shouldChangeText(in: NSRange(location: index, length: 0), replacementString: imageMarkdown) {
+                    textStorage?.replaceCharacters(in: NSRange(location: index, length: 0), with: imageMarkdown)
+                    didChangeText()
+                    print(" 拖拽生成 Markdown 图片语法:\n\(imageMarkdown)")
+                }
+                return true
+            }
+        }
+        return super.performDragOperation(sender)
+    }
+
+    override func paste(_ sender: Any?) {
+        let pboard = NSPasteboard.general
+        if let urls = pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            var imageMarkdown = ""
+            for url in urls {
+                if isImageURL(url) {
+                    imageMarkdown += "![image](\(url.path))\n"
+                }
+            }
+            if !imageMarkdown.isEmpty {
+                let range = selectedRange()
+                if shouldChangeText(in: range, replacementString: imageMarkdown) {
+                    textStorage?.replaceCharacters(in: range, with: imageMarkdown)
+                    didChangeText()
+                }
+                return
+            }
+        }
+        super.paste(sender)
+    }
     
-    /// 处理图片拖拽放入
     func handleImageDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let pboard = sender.draggingPasteboard
         guard let urls = pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] else {
@@ -76,7 +114,6 @@ extension MarkdownNativeTextView {
         return false
     }
 
-    /// 处理图片剪贴板粘贴
     func handleImagePaste() -> Bool {
         let pboard = NSPasteboard.general
         guard let urls = pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] else {
@@ -95,7 +132,6 @@ extension MarkdownNativeTextView {
         return false
     }
 
-    /// 校验 URL 是否为可接受的图片格式
     func isImageURL(_ url: URL) -> Bool {
         if let type = try? url.resourceValues(forKeys: [.typeIdentifierKey]).typeIdentifier,
            let utType = UTType(type) {

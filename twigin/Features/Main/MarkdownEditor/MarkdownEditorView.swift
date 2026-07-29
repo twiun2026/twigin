@@ -163,11 +163,8 @@ struct MarkdownTextView: NSViewRepresentable {
         private var lastConsumedFocusRequest: UUID?
 
         private let renderer: MarkdownRenderer
-        // 解析栈全部下沉到后台引擎，Coordinator（主线程）不再持有 parser / documentState。
         private let engine = MarkdownParsingEngine()
-
-        // 主线程侧的极简状态：编辑序号 + 跳帧赶齐标记 + 绑定回写抑制标记。
-        private var editSerial: UInt64 = 0
+        private var editSerial: UInt64 = 0// 主线程侧的极简状态：编辑序号 + 跳帧赶齐标记 + 绑定回写抑制标记。
         private var needsFullCatchup = false
         private var isLoadingContent = false
         var suppressStringSync = false
@@ -334,12 +331,9 @@ struct MarkdownTextView: NSViewRepresentable {
             let paragraph = backing.attributedSubstring(from: range)
             let ns = paragraph.string as NSString
 
-            // 1. Checklist 显示转换
             if let checklistParagraph = processChecklistParagraph(paragraph, range: range, nsString: ns) {
                 return checklistParagraph
             }
-            
-            // 2. 图片显示转换
             if let imageParagraph = processImageParagraph(in: paragraph, range: range, nsString: ns) {
                 return imageParagraph
             }
@@ -821,50 +815,6 @@ final class MarkdownNativeTextView: NSTextView {
             return
         }
         super.mouseDown(with: event)
-    }
-
-    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        let pboard = sender.draggingPasteboard
-        if let urls = pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
-            var imageMarkdown = ""
-            for url in urls {
-                if isImageURL(url) {
-                    imageMarkdown += "![image](\(url.path))\n"
-                }
-            }
-            if !imageMarkdown.isEmpty {
-                let point = convert(sender.draggingLocation, from: nil)
-                let index = characterIndexForInsertion(at: point)
-                if shouldChangeText(in: NSRange(location: index, length: 0), replacementString: imageMarkdown) {
-                    textStorage?.replaceCharacters(in: NSRange(location: index, length: 0), with: imageMarkdown)
-                    didChangeText()
-                    print(" 拖拽生成 Markdown 图片语法:\n\(imageMarkdown)")
-                }
-                return true
-            }
-        }
-        return super.performDragOperation(sender)
-    }
-
-    override func paste(_ sender: Any?) {
-        let pboard = NSPasteboard.general
-        if let urls = pboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
-            var imageMarkdown = ""
-            for url in urls {
-                if isImageURL(url) {
-                    imageMarkdown += "![image](\(url.path))\n"
-                }
-            }
-            if !imageMarkdown.isEmpty {
-                let range = selectedRange()
-                if shouldChangeText(in: range, replacementString: imageMarkdown) {
-                    textStorage?.replaceCharacters(in: range, with: imageMarkdown)
-                    didChangeText()
-                }
-                return
-            }
-        }
-        super.paste(sender)
     }
 }
 
