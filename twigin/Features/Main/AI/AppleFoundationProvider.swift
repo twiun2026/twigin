@@ -51,21 +51,29 @@ public final class AppleFoundationProvider: AIProvider {
                         }
 
                         let responseStream = session.streamResponse(to: prompt)
-                        var emittedLength = 0
+                        var lastIndex: String.Index? = nil
 
                         for try await snapshot in responseStream {
                             let fullText = snapshot.content
-                            guard fullText.count > emittedLength else { continue }
+                            
+                            // 初始化起始点
+                            if lastIndex == nil {
+                                lastIndex = fullText.startIndex
+                            }
+                            
+                            guard let currentIndex = lastIndex, currentIndex < fullText.endIndex else {
+                                continue
+                            }
 
-                            let startIndex = fullText.index(
-                                fullText.startIndex,
-                                offsetBy: emittedLength
-                            )
-                            let newChunk = String(fullText[startIndex...])
-                            continuation.yield(newChunk)
-                            emittedLength = fullText.count
+                            // 精确截取从 lastIndex 到最新 fullText.endIndex 的真正 Incremental Delta
+                            let newChunk = String(fullText[currentIndex..<fullText.endIndex])
+                            
+                            if !newChunk.isEmpty {
+                                continuation.yield(newChunk)
+                                // 更新锚点至最新的结尾
+                                lastIndex = fullText.endIndex
+                            }
                         }
-
                         continuation.finish()
                     } catch {
                         continuation.finish(throwing: Self.mapError(error))

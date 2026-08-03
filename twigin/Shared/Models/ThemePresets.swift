@@ -98,7 +98,7 @@ struct ThemePresets {
         textPrimary: Color(hex: 0xFF268579),
         textSecondary: Color(hex: 0xFF273043),
         textItalic: Color(hex: 0xFFB36DB3),
-        textCitation: Color(hex: 0xFF6A768B),
+        textCitation: Color(hex: 0xFF5A728E),   //Grayish Blue
         bgCitation: Color(hex: 0xFFF0F4FB),
         markerA: Color(hex: 0xFFBDBDBD),        // 红色标记
         markerB: Color(hex: 0xFFFFD666),        // 黄色标记

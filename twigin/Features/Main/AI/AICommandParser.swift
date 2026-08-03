@@ -105,21 +105,27 @@ public struct AICommandParser: Sendable {
 
     // MARK: - Parsing
 
-    /// Parses `line` into an `AIRequest`, or returns `nil` if no pattern matches.
-    ///
-    /// Leading and trailing whitespace is stripped before matching.
-    ///
-    /// - Parameter line: A single line of editor text.
-    /// - Returns: A fully populated `AIRequest`, or `nil`.
-    public func parse(_ line: String) -> AIRequest? {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return nil }
-
-        for matcher in matchers {
-            if let request = matcher.match(trimmed) {
-                return request
-            }
+    func parse(_ lineText: String) -> AIRequest? {
+        // 1. 先过滤掉末尾的换行符和空格
+        let trimmedText = lineText.trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // 2. 判断是否以 "??" 或 "？？" 结尾
+        let suffix: String?
+        if trimmedText.hasSuffix("??") {
+            suffix = "??"
+        } else if trimmedText.hasSuffix("？？") {
+            suffix = "？？"
+        } else {
+            suffix = nil
         }
+        
+        // 3. 如果匹配成功，截取问号之前的内容作为 Prompt
+        if let suffix = suffix {
+            let prompt = String(trimmedText.dropLast(suffix.count)).trimmingCharacters(in: .whitespaces)
+            guard !prompt.isEmpty else { return nil } // 防止只输入了 ?? 就触发
+            return AIRequest(command: .ask, prompt: prompt)
+        }
+        
         return nil
     }
 }
