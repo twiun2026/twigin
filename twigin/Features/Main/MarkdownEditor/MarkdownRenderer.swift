@@ -27,8 +27,7 @@ final class MarkdownRenderer {
         .underlineColor,
         .link,
         .attachment,
-        .paragraphStyle,
-        .customBlockquote
+        .paragraphStyle
     ]
 
     func bodyFont(size: CGFloat? = nil) -> NSFont {
@@ -65,7 +64,6 @@ final class MarkdownRenderer {
         guard let textStorage = context.textView.textStorage else { return }
         let storageLength = textStorage.length
 
-        // Bug 2: empty document must still invalidate layout to clear stale blockquote fragments
         if storageLength == 0 {
             if let tlm = context.textView.textLayoutManager,
                let cm = tlm.textContentManager {
@@ -185,8 +183,6 @@ final class MarkdownRenderer {
 
         for affectedRange in affectedRanges {
             guard affectedRange.length > 0 else { continue }
-            // Extend to the next full paragraph boundary so that TextKit 2 invalidates
-            // the complete adjacent paragraph fragment, not just a partial prefix.
             let end = NSMaxRange(affectedRange)
             let nextParaEnd = paragraphEnd(after: end, in: text, upTo: storageLength)
             let safeLength = max(nextParaEnd - affectedRange.location, affectedRange.length)
@@ -291,6 +287,7 @@ final class MarkdownRenderer {
         }
     }
     
+    // 💥 恢复历史版本完美的 Blockquote 排版逻辑（使用原生 NSTextBlock）
     private func applyBlockquote(
         markerRange: NSRange,
         contentRange: NSRange,
@@ -300,39 +297,34 @@ final class MarkdownRenderer {
         context: MarkdownRenderContext,
         theme: AppTheme
     ) {
-        // 1. 优先给整行设置引用属性标识（防止 safeRange 失败导致该行丢失 isBlockquote 标记）
-        guard let line = safeRange(lineRange, in: attributed) else { return }
-        attributed.addAttribute(.customBlockquote, value: true, range: line)
-        
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.firstLineHeadIndent = 16
-        paragraph.headIndent = 16
-        paragraph.tailIndent = -12
-        paragraph.paragraphSpacingBefore = 2
-        paragraph.paragraphSpacing = 6
+        guard let marker = safeRange(markerRange, in: attributed),
+              let content = safeRange(contentRange, in: attributed),
+              let line = safeRange(lineRange, in: attributed) else { return }
 
+        let showMarker = shouldShowMarker(lineRange, selectedRange: context.selectedRange)
+        let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
+
+        attributed.addAttributes([
+            .foregroundColor: markerColor,
+            .font: bodyFont()
+        ], range: marker)
+
+        attributed.addAttributes([
+            .foregroundColor: NSColor(theme.textCitation),
+            .font: bodyFont()
+        ], range: content)
+
+        let paragraph = NSMutableParagraphStyle()
+        let textBlock = NSTextBlock()
+        textBlock.backgroundColor = NSColor(theme.bgCitation)
+        textBlock.setWidth(8, type: .absoluteValueType, for: .padding)
+        textBlock.setWidth(16, type: .absoluteValueType, for: .margin, edge: .minX)
+        textBlock.setWidth(16, type: .absoluteValueType, for: .margin, edge: .maxX)
+        textBlock.setContentWidth(100, type: .percentageValueType)
+        paragraph.textBlocks = [textBlock]
+        paragraph.paragraphSpacing = 4
         applySpacing(to: paragraph, default: 2)
         applyParagraphStyle(paragraph, lineRange: line, to: attributed)
-
-        // 2. 尝试渲染 marker 符号
-        if let marker = safeRange(markerRange, in: attributed) {
-            let showMarker = shouldShowMarker(lineRange, selectedRange: context.selectedRange)
-            let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
-            let markerFont = bodyFont()
-            
-            attributed.addAttributes([
-                .foregroundColor: markerColor,
-                .font: markerFont
-            ], range: marker)
-        }
-
-        // 3. 尝试渲染 content 文本
-        if contentRange.length > 0, let content = safeRange(contentRange, in: attributed) {
-            attributed.addAttributes([
-                .foregroundColor: NSColor(theme.textCitation),
-                .font: bodyFont()
-            ], range: content)
-        }
 
         applyInline(inlines, to: attributed, theme: theme, context: context)
     }
@@ -349,7 +341,6 @@ final class MarkdownRenderer {
         guard let content = safeRange(contentRange, in: attributed),
               let line = safeRange(lineRange, in: attributed) else { return }
 
-        // 扩展 marker 范围（包含 ### 和后面的空格）
         let fullMarkerRange: NSRange
         if markerRange.location < contentRange.location {
             let length = contentRange.location - markerRange.location
@@ -360,8 +351,6 @@ final class MarkdownRenderer {
 
         guard let marker = safeRange(fullMarkerRange, in: attributed) else { return }
 
-        // 使用 lineRange（整行范围）来判断光标是否在该标题行内！
-        // 只要光标处于该标题行内（不论是点在 # 上还是文字中间），都展露 # 符号供编辑
         let showMarker = shouldShowMarkerForHeading(lineRange: lineRange, selectedRange: context.selectedRange)
         
         let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
@@ -369,19 +358,16 @@ final class MarkdownRenderer {
             ? NSFont.systemFont(ofSize: headingSize(for: level), weight: .bold)
             : NSFont.systemFont(ofSize: 0.01)
 
-        // 渲染 ### 及其后的空格
         attributed.addAttributes([
             .foregroundColor: markerColor,
             .font: markerFont
         ], range: marker)
 
-        // 渲染标题主体文本
         attributed.addAttributes([
             .foregroundColor: NSColor(theme.textHeader),
             .font: NSFont.systemFont(ofSize: headingSize(for: level), weight: .bold)
         ], range: content)
 
-        // 段落缩进归零
         let paragraph = NSMutableParagraphStyle()
         paragraph.firstLineHeadIndent = 0
         paragraph.headIndent = 0
@@ -402,9 +388,6 @@ final class MarkdownRenderer {
         attributed.addAttribute(.font, value: bodyFont(), range: line)
 
         let paragraph = NSMutableParagraphStyle()
-        paragraph.firstLineHeadIndent = 0
-        paragraph.headIndent = 0
-        paragraph.tailIndent = 0
         paragraph.paragraphSpacing = 4
         applySpacing(to: paragraph, default: 2)
         applyParagraphStyle(paragraph, lineRange: line, to: attributed)
@@ -432,8 +415,6 @@ final class MarkdownRenderer {
               let content = safeRange(contentRange, in: attributed),
               let line = safeRange(lineRange, in: attributed) else { return }
 
-        // 标记（- [ ] / - [x]）在 backing 上先隐藏；显示层由 content-storage 委托把首字符
-        // 替换为复选框图片附件（见 MarkdownEditorView.Coordinator）。
         attributed.addAttributes([
             .foregroundColor: NSColor.clear,
             .font: NSFont.systemFont(ofSize: 1)
@@ -468,10 +449,8 @@ final class MarkdownRenderer {
     ) {
         guard let line = safeRange(lineRange, in: attributed) else { return }
         
-        // 检查当前 range 内是否已经挂载了 MarkdownImageAttachment
         attributed.enumerateAttribute(.attachment, in: line, options: []) { value, range, _ in
             if let attachment = value as? MarkdownImageAttachment {
-                // 如果 attachment.bounds 为 .zero（初始状态），可以给它设置一个合理的默认 bounds
                 if attachment.bounds == .zero {
                     attachment.bounds = CGRect(x: 0, y: 0, width: 300, height: 200)
                 }
@@ -543,20 +522,22 @@ final class MarkdownRenderer {
         applyParagraphStyle(paragraph, lineRange: line, to: attributed)
     }
 
+    // 💥 还原历史版本最关键的延伸行尾 \n 覆盖逻辑，保证 TextKit 2 Fragment 在换行处彻底隔离
     private func applyParagraphStyle(_ paragraph: NSParagraphStyle, lineRange: NSRange, to attributed: NSMutableAttributedString) {
         guard let line = safeRange(lineRange, in: attributed) else { return }
-        attributed.addAttribute(.paragraphStyle, value: paragraph, range: line)
+        let needsExtend = (line.location + line.length < attributed.length)
+        let length = needsExtend ? line.length + 1 : line.length
+        let fullRange = NSRange(location: line.location, length: length)
+        attributed.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
     }
 
     private func applyInline(_ inlines: [MarkdownInline], to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
         for inline in inlines {
-            // 计算整个 inline 元素的完整范围（从 markerOpen 起到 markerClose 止）
             let fullInlineRange = NSRange(
                 location: inline.markerOpen.location,
                 length: NSMaxRange(inline.markerClose) - inline.markerOpen.location
             )
             
-            // 判断光标是否落在这个 inline 区域内
             let showMarker = shouldShowMarker(fullInlineRange, selectedRange: context.selectedRange)
             let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
             let markerFont = showMarker ? NSFont.monospacedSystemFont(ofSize: max(10, baseFontSize - 1), weight: .regular) : NSFont.systemFont(ofSize: 0.01)
@@ -615,7 +596,6 @@ final class MarkdownRenderer {
     }
 
     private func headingSize(for level: Int) -> CGFloat {
-        // Ratios relative to base 14: H1=28, H2=24, H3=20, H4=18, H5=16, H6=15
         let ratios: [CGFloat] = [2.0, 12.0/7.0, 10.0/7.0, 9.0/7.0, 8.0/7.0, 15.0/14.0]
         let idx = max(0, min(level - 1, 5))
         return (baseFontSize * ratios[idx]).rounded()
@@ -641,11 +621,6 @@ extension NSRange {
     func overlaps(_ other: NSRange) -> Bool {
         max(location, other.location) <= min(NSMaxRange(self), NSMaxRange(other))
     }
-}
-
-// 定义一个自定义 Key 用于标识引用块属性
-extension NSAttributedString.Key {
-    static let customBlockquote = NSAttributedString.Key("twigin.markdown.isBlockquote")
 }
 
 extension NSAttributedString.Key {
