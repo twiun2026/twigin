@@ -49,7 +49,8 @@ final class MarkdownRenderer {
     private func baseAttributes(theme: AppTheme) -> [NSAttributedString.Key: Any] {
         [
             .foregroundColor: NSColor(theme.textMain),
-            .font: bodyFont()
+            .font: bodyFont(),
+            .paragraphStyle: NSParagraphStyle.default
         ]
     }
 
@@ -231,7 +232,7 @@ final class MarkdownRenderer {
         return NSRange(location: lowerBound, length: upperBound - lowerBound)
     }
 
-    private func shouldShowMarker(_ targetRange: NSRange, selectedRange: NSRange?) -> Bool {
+    func shouldShowMarker(_ targetRange: NSRange, selectedRange: NSRange?) -> Bool {
         guard let selected = selectedRange else { return false }
         
         if selected.length > 0 {
@@ -273,10 +274,17 @@ final class MarkdownRenderer {
         case .blockquote:
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyBlockquote(markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, context: context, theme: theme)
+            MarkdownBlockquote.apply(
+                    markerRange: markerRange,
+                    contentRange: contentRange,
+                    lineRange: block.lineRange,
+                    inlines: block.inlines,
+                    to: attributed,
+                    context: context,
+                    theme: theme,
+                    renderer: self
+                )
 
-        case .codeBlock:
-            applyCodeBlock(lineRange: block.lineRange, to: attributed, theme: theme)
         case .footnote(label: _):
             guard let markerRange = block.markerRange,
                   let _ = block.contentRange else { return }
@@ -284,49 +292,9 @@ final class MarkdownRenderer {
                 .foregroundColor: NSColor(theme.textSecondary)
             ], range: markerRange)
             applyInline(block.inlines, to: attributed, theme: theme, context: context)
+        case .codeBlock:
+            break
         }
-    }
-    
-    // 💥 恢复历史版本完美的 Blockquote 排版逻辑（使用原生 NSTextBlock）
-    private func applyBlockquote(
-        markerRange: NSRange,
-        contentRange: NSRange,
-        lineRange: NSRange,
-        inlines: [MarkdownInline],
-        to attributed: NSMutableAttributedString,
-        context: MarkdownRenderContext,
-        theme: AppTheme
-    ) {
-        guard let marker = safeRange(markerRange, in: attributed),
-              let content = safeRange(contentRange, in: attributed),
-              let line = safeRange(lineRange, in: attributed) else { return }
-
-        let showMarker = shouldShowMarker(lineRange, selectedRange: context.selectedRange)
-        let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
-
-        attributed.addAttributes([
-            .foregroundColor: markerColor,
-            .font: bodyFont()
-        ], range: marker)
-
-        attributed.addAttributes([
-            .foregroundColor: NSColor(theme.textCitation),
-            .font: bodyFont()
-        ], range: content)
-
-        let paragraph = NSMutableParagraphStyle()
-        let textBlock = NSTextBlock()
-        textBlock.backgroundColor = NSColor(theme.bgCitation)
-        textBlock.setWidth(8, type: .absoluteValueType, for: .padding)
-        textBlock.setWidth(16, type: .absoluteValueType, for: .margin, edge: .minX)
-        textBlock.setWidth(16, type: .absoluteValueType, for: .margin, edge: .maxX)
-        textBlock.setContentWidth(100, type: .percentageValueType)
-        paragraph.textBlocks = [textBlock]
-        paragraph.paragraphSpacing = 4
-        applySpacing(to: paragraph, default: 2)
-        applyParagraphStyle(paragraph, lineRange: line, to: attributed)
-
-        applyInline(inlines, to: attributed, theme: theme, context: context)
     }
 
     private func applyHeading(
@@ -503,27 +471,7 @@ final class MarkdownRenderer {
         applyInline(inlines, to: attributed, theme: theme, context: context)
     }
 
-    private func applyCodeBlock(
-        lineRange: NSRange,
-        to attributed: NSMutableAttributedString,
-        theme: AppTheme
-    ) {
-        guard let line = safeRange(lineRange, in: attributed) else { return }
-
-        attributed.addAttributes([
-            .foregroundColor: NSColor(theme.textSecondary),
-            .font: NSFont.monospacedSystemFont(ofSize: max(10, baseFontSize - 0.5), weight: .regular),
-            .backgroundColor: NSColor(theme.bgCitation)
-        ], range: line)
-
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.paragraphSpacing = 4
-        applySpacing(to: paragraph, default: 1)
-        applyParagraphStyle(paragraph, lineRange: line, to: attributed)
-    }
-
-    // 💥 还原历史版本最关键的延伸行尾 \n 覆盖逻辑，保证 TextKit 2 Fragment 在换行处彻底隔离
-    private func applyParagraphStyle(_ paragraph: NSParagraphStyle, lineRange: NSRange, to attributed: NSMutableAttributedString) {
+    func applyParagraphStyle(_ paragraph: NSParagraphStyle, lineRange: NSRange, to attributed: NSMutableAttributedString) {
         guard let line = safeRange(lineRange, in: attributed) else { return }
         let needsExtend = (line.location + line.length < attributed.length)
         let length = needsExtend ? line.length + 1 : line.length
@@ -531,7 +479,7 @@ final class MarkdownRenderer {
         attributed.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
     }
 
-    private func applyInline(_ inlines: [MarkdownInline], to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
+    func applyInline(_ inlines: [MarkdownInline], to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
         for inline in inlines {
             let fullInlineRange = NSRange(
                 location: inline.markerOpen.location,
@@ -601,7 +549,7 @@ final class MarkdownRenderer {
         return (baseFontSize * ratios[idx]).rounded()
     }
 
-    private func safeRange(_ range: NSRange, in attributed: NSAttributedString) -> NSRange? {
+    func safeRange(_ range: NSRange, in attributed: NSAttributedString) -> NSRange? {
         guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= attributed.length else { return nil }
         return range
     }

@@ -404,7 +404,8 @@ struct MarkdownTextView: NSViewRepresentable {
                 }
                 storage.addAttributes([
                     .foregroundColor: NSColor(parent.theme.textMain),
-                    .font: renderer.bodyFont()
+                    .font: renderer.bodyFont(),
+                    .paragraphStyle: NSParagraphStyle.default
                 ], range: range)
             }
             
@@ -471,23 +472,13 @@ struct MarkdownTextView: NSViewRepresentable {
                 let nsString = textView.string as NSString
                 let lineRange = nsString.lineRange(for: selectedRange)
                 let lineText = nsString.substring(with: lineRange)
-                
-                let trimmedLine = lineText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmedLine == ">" || (trimmedLine.isEmpty && lineText.contains(">")) {
-                    if textView.shouldChangeText(in: lineRange, replacementString: "") {
-                        let previousLineEndLocation = max(0, lineRange.location - 1)
-                        textView.textStorage?.replaceCharacters(in: lineRange, with: "")
-                        textView.didChangeText()
-                        DispatchQueue.main.async { [weak textView] in
-                            guard let textView = textView else { return }
-                            let safeLocation = min(previousLineEndLocation, (textView.string as NSString).length)
-                            let newRange = NSRange(location: safeLocation, length: 0)
-                            textView.setSelectedRange(newRange)
-                            textView.scrollRangeToVisible(newRange)
-                        }
-                        return true
-                    }
+
+                // 调用 Handler 处理删除逻辑
+                if MarkdownBlockquote.handleDeleteBackward(in: lineText, lineRange: lineRange, textView: textView) {
+                    return true
                 }
+        
+                let trimmedLine = lineText.trimmingCharacters(in: .whitespacesAndNewlines)
                 if trimmedLine.isEmpty, let storage = textView.textStorage, lineRange.location < storage.length {
                     var hasTextBlock = false
                     storage.enumerateAttribute(.paragraphStyle, in: lineRange, options: []) { value, _, stop in
@@ -518,7 +509,8 @@ struct MarkdownTextView: NSViewRepresentable {
                     }
                 }
             }
-        
+            
+            // MARK: - 2. 处理 回车键 (Insert Newline)
             guard commandSelector == #selector(NSResponder.insertNewline(_:)),
                   let selectedRange = textView.selectedRanges.first?.rangeValue else { return false }
 
@@ -601,30 +593,12 @@ struct MarkdownTextView: NSViewRepresentable {
                     }
                 }
             }
-            if let blockquoteMatch = try? NSRegularExpression(pattern: "^(\\s*>)\\s*(.*)$")
-                .firstMatch(in: lineText, range: NSRange(location: 0, length: (lineText as NSString).length)) {
 
-                let marker = (lineText as NSString).substring(with: blockquoteMatch.range(at: 1))
-                let content = (lineText as NSString).substring(with: blockquoteMatch.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
-
-                if content.isEmpty {
-                    let markerRangeInLine = blockquoteMatch.range(at: 1)
-                    let absoluteMarkerRange = NSRange(location: lineRange.location + markerRangeInLine.location, length: markerRangeInLine.length)
-                    if textView.shouldChangeText(in: absoluteMarkerRange, replacementString: "") {
-                        textView.textStorage?.replaceCharacters(in: absoluteMarkerRange, with: "")
-                        textView.didChangeText()
-                        return true
-                    }
-                } else {
-                    let autoInsertText = "\n\(marker) "
-                    if textView.shouldChangeText(in: selectedRange, replacementString: autoInsertText) {
-                        textView.insertText(autoInsertText, replacementRange: selectedRange)
-                        textView.didChangeText()
-                        return true
-                    }
-                }
+            //在此处调用 Handler 处理引用块的回车逻辑（自动续行 / 连续回车退出）
+            if MarkdownBlockquote.handleInsertNewline(in: lineText, lineRange: lineRange, selectedRange: selectedRange, textView: textView) {
+                return true
             }
-
+            
             return false
         }
         
