@@ -74,6 +74,9 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.autoresizingMask = [.width, .height]
         scrollView.documentView = textView
 
+        // 注册滚动事件监听，驱动视口外区域的按需补渲
+        context.coordinator.setupScrollObserver(on: scrollView)
+
         return scrollView
     }
 
@@ -176,11 +179,25 @@ struct MarkdownTextView: NSViewRepresentable {
         var contextMenuAITask: Task<Void, Never>?
         var aiPopoverController: AiPopoverController?
         
-        //Selection and cached Block
+        // Selection and cached Block
         var lastSelectedRange: NSRange? = nil
         var cachedBlocks: [MarkdownBlock] = []
         var isInsertingText = false
-        
+
+        // 视口惰性渲染：全量加载时缓存所有块，仅对视口范围写属性；
+        // 随用户滚动由 renderViewportIfNeeded 按需补全样式。
+        var pendingAllBlocks: [MarkdownBlock] = []
+        // 已完成样式渲染的字符区间集合（避免重复 setAttributes）
+        var styledRanges = IndexSet()
+        // NSView.boundsDidChangeNotification observer，用于监听滚动事件
+        nonisolated(unsafe) var boundsObserver: (any NSObjectProtocol)?
+
+        deinit {
+            if let obs = boundsObserver {
+                NotificationCenter.default.removeObserver(obs)
+            }
+        }
+
         init(parent: MarkdownTextView) {
             self.parent = parent
             self.renderer = MarkdownRenderer()
@@ -245,8 +262,9 @@ struct MarkdownTextView: NSViewRepresentable {
         }
 
         // MARK: 重渲染
-        // 该方法会触发全量渲染，确保渲染结果与引擎状态一致
+        // 主题 / 字体变化时触发：重置已渲染区间记录，确保整篇重新应用新样式
         func rerenderFull() {
+            styledRanges.removeAll()
             let expected = editSerial
             engine.snapshot { [weak self] snapshot in
                 DispatchQueue.main.async {
@@ -368,15 +386,113 @@ struct MarkdownTextView: NSViewRepresentable {
             guard let textView else { return }
             hasPendingEdit = false
             self.cachedBlocks = blocks
+            // 缓存全量块供后续滚动补渲，并重置已渲染区间记录
+            self.pendingAllBlocks = blocks
+            self.styledRanges.removeAll()
+
             renderer.bodyFontName = parent.fontName
             renderer.baseFontSize = parent.fontSize
             renderer.lineSpacingMultiplier = parent.lineSpacing
-            let document = MarkdownDocument(source: "", affectedRange: nil, blockDiff: nil, revision: 0, explicitBlocks: blocks)
+
+            // 计算当前视口字符区间（初次打开时退化为文档头部固定窗口）。
+            // 将 affectedRange 设为视口区间而非 nil：
+            //   • makeRenderPlan 的全量路径使用 affectedRange 作为 setAttributes 范围，
+            //     因此只有视口内的块才会被赋予 Markdown 样式，O(Viewport) 而非 O(N)。
+            //   • 视口外区域保持 NSTextStorage 的纯文本默认外观（textView.string = text 注入后的状态），
+            //     TextKit 2 内部的视口驱动排版机制确保这些区域在排版前不会触发 CPU 开销。
+            let vpRange = MarkdownRenderer.viewportCharRange(in: textView)
+            let document = MarkdownDocument(
+                source: "",
+                affectedRange: vpRange.length > 0 ? vpRange : nil,
+                blockDiff: nil,
+                revision: 0,
+                explicitBlocks: blocks
+            )
             renderer.render(makeContext(textView: textView, document: document))
+
+            // 将视口区间标记为已渲染
+            if vpRange.length > 0, let r = Range(vpRange) {
+                styledRanges.insert(integersIn: r)
+            }
+
             lastRenderedTheme = parent.theme
             lastRenderedFontName = parent.fontName
             lastRenderedFontSize = parent.fontSize
             lastRenderedLineSpacing = parent.lineSpacing
+        }
+
+        // MARK: - 滚动补渲
+
+        /// 当用户滚动到尚未渲染的区域时，对新进入视口的块补全 Markdown 样式。
+        /// 此方法由滚动通知触发（见 setupScrollObserver），仅在有未渲染内容时才执行渲染，
+        /// 与增量打字渲染（renderIncremental）完全独立，互不干扰。
+        @MainActor private func renderViewportIfNeeded() {
+            guard let textView,
+                  let storage = textView.textStorage,
+                  storage.length > 0,
+                  !pendingAllBlocks.isEmpty else { return }
+
+            let vpRange = MarkdownRenderer.viewportCharRange(in: textView)
+            guard vpRange.length > 0, let vpSwiftRange = Range(vpRange) else { return }
+
+            // 从视口区间中去掉已渲染部分，得到待补渲的字符区间集合（IndexSet 原生支持集合差）
+            var unstyledSet = IndexSet(integersIn: vpSwiftRange)
+            unstyledSet.subtract(styledRanges)
+            guard !unstyledSet.isEmpty else { return }
+
+            // 将未渲染区间转换为 NSRange 列表，供后续块过滤
+            let unstyledRanges: [NSRange] = unstyledSet.rangeView.map { NSRange($0) }
+
+            // 找出所有与未渲染区间重叠的块
+            let blocksToRender = pendingAllBlocks.filter { block in
+                unstyledRanges.contains { $0.overlaps(block.lineRange) }
+            }
+            guard !blocksToRender.isEmpty else {
+                // 无待渲染块（可能是空行区域），直接标记视口为已渲染
+                styledRanges.insert(integersIn: vpSwiftRange)
+                return
+            }
+
+            // 计算待渲染块的字符区间联合，作为本次 setAttributes 的 affectedRange
+            let unionRange = blocksToRender.reduce(blocksToRender[0].lineRange) {
+                NSUnionRange($0, $1.lineRange)
+            }
+            let len = storage.length
+            let clamped = NSRange(
+                location: max(0, unionRange.location),
+                length: min(len, NSMaxRange(unionRange)) - max(0, unionRange.location)
+            )
+            guard clamped.length > 0 else { return }
+
+            renderer.bodyFontName = parent.fontName
+            renderer.baseFontSize = parent.fontSize
+            renderer.lineSpacingMultiplier = parent.lineSpacing
+
+            // 复用全量渲染路径：affectedRange 限定为本次需补渲的区间，
+            // blockDiff 为 nil 走全量分支，explicitBlocks 传入全量块供范围过滤。
+            let doc = MarkdownDocument(
+                source: "", affectedRange: clamped, blockDiff: nil,
+                revision: 0, explicitBlocks: pendingAllBlocks
+            )
+            renderer.render(makeContext(textView: textView, document: doc))
+
+            // 将整个视口区间标记为已渲染（保守策略，避免同区间反复触发）
+            styledRanges.insert(integersIn: vpSwiftRange)
+        }
+
+        /// 注册滚动通知，内容视图的 bounds 变化即代表滚动事件。
+        func setupScrollObserver(on scrollView: NSScrollView) {
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            boundsObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView,
+                queue: .main
+            ) { [weak self] _ in
+                // 已在主队列（queue: .main），通过 Task 跳转到 MainActor 隔离域
+                Task { @MainActor [weak self] in
+                    self?.renderViewportIfNeeded()
+                }
+            }
         }
 
         @MainActor func makeContext(textView: MarkdownNativeTextView, document: MarkdownDocument) -> MarkdownRenderContext {

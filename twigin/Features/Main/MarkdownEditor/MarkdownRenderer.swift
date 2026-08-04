@@ -11,31 +11,62 @@ struct MarkdownRenderContext {
     let onTapImage: (String) -> Void
 }
 
+private struct _FontKey: Hashable, Sendable {
+    let name: String       // 字体族名；空串表示系统字体
+    let size: CGFloat
+    let weightRaw: CGFloat // NSFont.Weight.rawValue
+    let mono: Bool
+}
+
+
 @MainActor
 final class MarkdownRenderer {
+    // MARK: - 字体 Cascade 描述符缓存（@MainActor 静态，无需锁）
+    //
+    // 将字体创建开销从 O(段落数 × 每渲染帧) 降为 O(1) 均摊。
+    // 每次 NSFont.systemFont / monospacedSystemFont / NSFontManager 调用都触发
+    // CoreText 字体匹配；在 5 万字文档中累积开销显著，此缓存彻底消除该瓶颈。
+    // 声明在 @MainActor 类内部，所有渲染调用均在主线程，无需额外加锁。
+    private static var fontCache: [_FontKey: NSFont] = [:]
+    private static var italicCache: [String: NSFont] = [:]
+
+    /// 返回缓存的 NSFont；首次访问时创建并写入缓存。
+    static func cachedFont(
+        name: String = "",
+        size: CGFloat,
+        weight: NSFont.Weight = .regular,
+        mono: Bool = false
+    ) -> NSFont {
+        let key = _FontKey(name: name, size: size, weightRaw: weight.rawValue, mono: mono)
+        if let hit = fontCache[key] { return hit }
+        let font: NSFont
+        if mono {
+            font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+        } else if !name.isEmpty, let f = NSFont(name: name, size: size) {
+            font = f
+        } else {
+            font = NSFont.systemFont(ofSize: size, weight: weight)
+        }
+        fontCache[key] = font
+        return font
+    }
+
+    /// 通过 NSFontManager 合成斜体变体（开销高，单独缓存）。
+    static func cachedItalicFont(family: String, size: CGFloat, fallback: NSFont) -> NSFont {
+        let key = "\(family):\(size)"
+        if let hit = italicCache[key] { return hit }
+        let f = NSFontManager.shared.font(
+            withFamily: family, traits: .italicFontMask, weight: 5, size: size
+        ) ?? fallback
+        italicCache[key] = f
+        return f
+    }
     var bodyFontName: String = ""
     var lineSpacingMultiplier: CGFloat = 0
     var baseFontSize: CGFloat = 14
 
-    private let attributesToClear: [NSAttributedString.Key] = [
-        .foregroundColor,
-        .backgroundColor,
-        .font,
-        .strikethroughStyle,
-        .strikethroughColor,
-        .underlineStyle,
-        .underlineColor,
-        .link,
-        .attachment,
-        .paragraphStyle
-    ]
-
     func bodyFont(size: CGFloat? = nil) -> NSFont {
-        let s = size ?? baseFontSize
-        if !bodyFontName.isEmpty, let font = NSFont(name: bodyFontName, size: s) {
-            return font
-        }
-        return NSFont.systemFont(ofSize: s, weight: .regular)
+        Self.cachedFont(name: bodyFontName, size: size ?? baseFontSize)
     }
 
     private func applySpacing(to paragraph: NSMutableParagraphStyle, default defaultSpacing: CGFloat) {
@@ -61,6 +92,47 @@ final class MarkdownRenderer {
         )
     }
 
+    // MARK: - 视口字符区间计算
+    //
+    // 核心设计：将屏幕可见矩形换算为字符区间，不强制触发全文排版。
+    //
+    // characterIndexForInsertion(at:) 在已排版区域为 O(1) 命中缓存；
+    // 在未排版区域返回文档边界（不强制布局）。初次打开时 visibleRect.height 极小
+    // 或 rawTop == rawBot，此时退化为头部固定窗口（charBuffer 个字符），
+    // 保证首屏即时呈现后再由 renderViewportIfNeeded 随滚动按需补渲。
+    static func viewportCharRange(
+        in textView: MarkdownNativeTextView,
+        charBuffer: Int = 6000
+    ) -> NSRange {
+        let len = (textView.string as NSString).length
+        guard len > 0 else { return NSRange(location: 0, length: 0) }
+
+        let visible = textView.visibleRect
+        guard visible.height > 20 else {
+            // 视图未完成首次布局 → 头部固定窗口
+            return NSRange(location: 0, length: min(len, charBuffer))
+        }
+
+        let rawTop = textView.characterIndexForInsertion(at: CGPoint(x: 4, y: max(0, visible.minY)))
+        let rawBot = textView.characterIndexForInsertion(at: CGPoint(x: 4, y: visible.maxY))
+
+        guard rawBot > rawTop else {
+            // 视口区域尚无布局缓存 → 退化为头部固定窗口
+            return NSRange(location: 0, length: min(len, charBuffer))
+        }
+
+        let start = max(0, rawTop - charBuffer)
+        let end   = min(len, rawBot + charBuffer)
+        return NSRange(location: start, length: end - start)
+    }
+
+    // MARK: - 主渲染入口
+    //
+    // 增量路径（blockDiff != nil）和全量路径（blockDiff == nil）在此分流：
+    //   • 增量：makeRenderPlan 从 blockDiff 提取受影响范围，仅对变化块做 setAttributes。
+    //   • 全量：makeRenderPlan 使用 document.affectedRange 作为渲染窗口；
+    //     Coordinator.renderFull 会将视口区间填入 affectedRange，
+    //     因此 setAttributes 仅作用于视口，O(Viewport) 而非 O(N)。
     func render(_ context: MarkdownRenderContext) {
         guard let textStorage = context.textView.textStorage else { return }
         let storageLength = textStorage.length
@@ -92,6 +164,8 @@ final class MarkdownRenderer {
         invalidateLayout(in: context.textView, affectedRanges: renderPlan.ranges)
     }
 
+    // MARK: - RenderPlan 构建
+
     private struct RenderPlan {
         var ranges: [NSRange]
         var blocks: [MarkdownBlock]
@@ -103,7 +177,12 @@ final class MarkdownRenderer {
         return min(NSMaxRange(paraRange), limit)
     }
 
-    private func makeRenderPlan(document: MarkdownDocument, storageLength: Int, text: NSString? = nil) -> RenderPlan {
+    private func makeRenderPlan(
+        document: MarkdownDocument,
+        storageLength: Int,
+        text: NSString? = nil
+    ) -> RenderPlan {
+        // ── 增量路径：保留完整 blockDiff 逻辑，不作任何改动 ──
         if let blockDiff = document.blockDiff, !blockDiff.isEmpty {
             var ranges: [NSRange] = []
             var diffBlocks: [MarkdownBlock] = []
@@ -124,7 +203,7 @@ final class MarkdownRenderer {
             if let affected = document.affectedRange {
                 ranges.append(clamp(range: affected, storageLength: storageLength))
             }
-    
+
             let extendedRanges = ranges.map { r -> NSRange in
                 let loc = r.location
                 let end = NSMaxRange(r)
@@ -139,7 +218,7 @@ final class MarkdownRenderer {
 
             let mergedRanges = mergeRanges(extendedRanges)
             let latestMaterializedBlocks = document.blocks
-            
+
             var allAffectedBlocks = diffBlocks
             for range in mergedRanges {
                 let overlappingBlocks = latestMaterializedBlocks.filter { $0.lineRange.overlaps(range) }
@@ -153,29 +232,40 @@ final class MarkdownRenderer {
             return RenderPlan(ranges: mergedRanges, blocks: allAffectedBlocks)
         }
 
+        // ── 全量路径（初次加载 / 笔记切换 / 主题变化 / 滚动补渲）──
+        //
+        // document.affectedRange 由调用方控制：
+        //   • renderFull → 设为 viewportCharRange（视口区间），实现视口惰性渲染
+        //   • renderViewportIfNeeded → 设为新进入视口的未渲染区间联合
+        //   • nil → 退化为全文（兜底，极少触发）
+        //
+        // setAttributes 范围 = applyRange，视口外区域的纯文本默认外观保持不变，
+        // 待用户滚动到达后再由 renderViewportIfNeeded 按需补全样式。
         let applyRange = clampedApplyRange(for: document, storageLength: storageLength)
         let affectedBlocks = document.blocks.filter { $0.lineRange.overlaps(applyRange) }
-        return RenderPlan(ranges: applyRange.length > 0 ? [applyRange] : [], blocks: affectedBlocks)
+        return RenderPlan(
+            ranges: applyRange.length > 0 ? [applyRange] : [],
+            blocks: affectedBlocks
+        )
     }
 
     private func clampedApplyRange(for document: MarkdownDocument, storageLength: Int) -> NSRange {
         let raw = document.affectedRange ?? NSRange(location: 0, length: storageLength)
-        let lowerBound = min(max(raw.location, 0), storageLength)
-        let upperBound = min(max(NSMaxRange(raw), lowerBound), storageLength)
-        return NSRange(location: lowerBound, length: upperBound - lowerBound)
+        let lo = min(max(raw.location, 0), storageLength)
+        let hi = min(max(NSMaxRange(raw), lo), storageLength)
+        return NSRange(location: lo, length: hi - lo)
     }
 
-    private func resetAttributes(in range: NSRange, storage: NSTextStorage, theme: AppTheme) {        guard range.length > 0 else { return }
+    private func resetAttributes(in range: NSRange, storage: NSTextStorage, theme: AppTheme) {
+        guard range.length > 0 else { return }
         storage.setAttributes(baseAttributes(theme: theme), range: range)
     }
 
     func invalidateLayout(in textView: MarkdownNativeTextView, affectedRanges: [NSRange]) {
         guard let textLayoutManager = textView.textLayoutManager,
-              let textContentManager = textLayoutManager.textContentManager else {
-            return
-        }
-
+              let textContentManager = textLayoutManager.textContentManager else { return }
         guard !affectedRanges.isEmpty else { return }
+
         let documentRange = textContentManager.documentRange
         let storageLength = (textView.string as NSString).length
         let text = textView.string as NSString
@@ -198,99 +288,102 @@ final class MarkdownRenderer {
     }
 
     private func mergeRanges(_ ranges: [NSRange]) -> [NSRange] {
-        let sorted = ranges.filter { $0.length > 0 }.sorted { lhs, rhs in
-            if lhs.location == rhs.location {
-                return lhs.length < rhs.length
-            }
-            return lhs.location < rhs.location
+        let sorted = ranges.filter { $0.length > 0 }.sorted {
+            $0.location == $1.location ? $0.length < $1.length : $0.location < $1.location
         }
-
         guard !sorted.isEmpty else { return [] }
-
         var merged: [NSRange] = [sorted[0]]
         for range in sorted.dropFirst() {
             guard let last = merged.last else { continue }
             if NSMaxRange(last) >= range.location {
-                let union = NSUnionRange(last, range)
-                merged[merged.count - 1] = union
+                merged[merged.count - 1] = NSUnionRange(last, range)
             } else {
                 merged.append(range)
             }
         }
-
         return merged
     }
 
     private func clamp(range: NSRange, storageLength: Int) -> NSRange {
-        let lowerBound = min(max(range.location, 0), storageLength)
-        let upperBound = min(max(NSMaxRange(range), lowerBound), storageLength)
-        return NSRange(location: lowerBound, length: upperBound - lowerBound)
+        let lo = min(max(range.location, 0), storageLength)
+        let hi = min(max(NSMaxRange(range), lo), storageLength)
+        return NSRange(location: lo, length: hi - lo)
     }
 
     func shouldShowMarker(_ targetRange: NSRange, selectedRange: NSRange?) -> Bool {
-        guard let selected = selectedRange else { return false }
-        
-        if selected.length > 0 {
-            return false
-        }
-        
-        let location = selected.location
-        return location >= targetRange.location && location <= NSMaxRange(targetRange)
+        guard let selected = selectedRange, selected.length == 0 else { return false }
+        return selected.location >= targetRange.location && selected.location <= NSMaxRange(targetRange)
     }
-    
-    func applyBlock(_ block: MarkdownBlock, to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
+
+    // MARK: - 块分派
+
+    func applyBlock(
+        _ block: MarkdownBlock,
+        to attributed: NSMutableAttributedString,
+        theme: AppTheme,
+        context: MarkdownRenderContext
+    ) {
         switch block.kind {
         case let .heading(level):
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyHeading(level: level, markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, to: attributed, context: context, theme: theme)
-
+            applyHeading(
+                level: level, markerRange: markerRange, contentRange: contentRange,
+                lineRange: block.lineRange, to: attributed, context: context, theme: theme
+            )
         case .paragraph:
-            applyParagraph(lineRange: block.lineRange, inlines: block.inlines, to: attributed, context: context, theme: theme)
-
+            applyParagraph(
+                lineRange: block.lineRange, inlines: block.inlines,
+                to: attributed, context: context, theme: theme
+            )
         case let .checklist(marker):
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyChecklist(marker: marker, markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, theme: theme, context: context)
-
+            applyChecklist(
+                marker: marker, markerRange: markerRange, contentRange: contentRange,
+                lineRange: block.lineRange, inlines: block.inlines,
+                to: attributed, theme: theme, context: context
+            )
         case let .image(_, path):
-            applyImageAttachment(path: path, lineRange: block.lineRange, to: attributed, theme: theme, context: context)
-
+            applyImageAttachment(
+                path: path, lineRange: block.lineRange,
+                to: attributed, theme: theme, context: context
+            )
         case .bulletList:
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyListBlock(markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, context: context, theme: theme, indent: 20)
-
+            applyListBlock(
+                markerRange: markerRange, contentRange: contentRange,
+                lineRange: block.lineRange, inlines: block.inlines,
+                to: attributed, context: context, theme: theme, indent: 20
+            )
         case .orderedList:
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
-            applyListBlock(markerRange: markerRange, contentRange: contentRange, lineRange: block.lineRange, inlines: block.inlines, to: attributed, context: context, theme: theme, indent: 24)
-
+            applyListBlock(
+                markerRange: markerRange, contentRange: contentRange,
+                lineRange: block.lineRange, inlines: block.inlines,
+                to: attributed, context: context, theme: theme, indent: 24
+            )
         case .blockquote:
             guard let markerRange = block.markerRange,
                   let contentRange = block.contentRange else { return }
             MarkdownBlockquote.apply(
-                    markerRange: markerRange,
-                    contentRange: contentRange,
-                    lineRange: block.lineRange,
-                    inlines: block.inlines,
-                    to: attributed,
-                    context: context,
-                    theme: theme,
-                    renderer: self
-                )
-
+                markerRange: markerRange, contentRange: contentRange,
+                lineRange: block.lineRange, inlines: block.inlines,
+                to: attributed, context: context, theme: theme, renderer: self
+            )
         case .footnote(label: _):
             guard let markerRange = block.markerRange,
                   let _ = block.contentRange else { return }
-            attributed.addAttributes([
-                .foregroundColor: NSColor(theme.textSecondary)
-            ], range: markerRange)
+            attributed.addAttributes([.foregroundColor: NSColor(theme.textSecondary)], range: markerRange)
             applyInline(block.inlines, to: attributed, theme: theme, context: context)
         case .codeBlock:
             break
         }
     }
+
+    // MARK: - 具体块样式
 
     private func applyHeading(
         level: Int,
@@ -311,24 +404,21 @@ final class MarkdownRenderer {
         } else {
             fullMarkerRange = markerRange
         }
-
         guard let marker = safeRange(fullMarkerRange, in: attributed) else { return }
 
         let showMarker = shouldShowMarkerForHeading(lineRange: lineRange, selectedRange: context.selectedRange)
-        
-        let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
-        let markerFont = showMarker
-            ? NSFont.systemFont(ofSize: headingSize(for: level), weight: .bold)
-            : NSFont.systemFont(ofSize: 0.01)
+        let hSize = headingSize(for: level)
+        // 使用缓存字体，避免每次标题渲染都触发 CoreText 匹配
+        let headingFont = Self.cachedFont(size: hSize, weight: .bold)
 
         attributed.addAttributes([
-            .foregroundColor: markerColor,
-            .font: markerFont
+            .foregroundColor: showMarker ? NSColor(theme.textMuted) : NSColor.clear,
+            .font: showMarker ? headingFont : Self.cachedFont(size: 0.01)
         ], range: marker)
 
         attributed.addAttributes([
             .foregroundColor: NSColor(theme.textHeader),
-            .font: NSFont.systemFont(ofSize: headingSize(for: level), weight: .bold)
+            .font: headingFont
         ], range: content)
 
         let paragraph = NSMutableParagraphStyle()
@@ -360,7 +450,7 @@ final class MarkdownRenderer {
                 attributed.addAttribute(.foregroundColor, value: NSColor(theme.textCitation), range: range)
             }
         }
-        
+
         applyInline(inlines, to: attributed, theme: theme, context: context)
     }
 
@@ -380,12 +470,12 @@ final class MarkdownRenderer {
 
         attributed.addAttributes([
             .foregroundColor: NSColor.clear,
-            .font: NSFont.systemFont(ofSize: 1)
+            .font: Self.cachedFont(size: 1)
         ], range: markerTextRange)
 
         var contentAttributes: [NSAttributedString.Key: Any] = [
             .foregroundColor: NSColor(theme.textMain),
-            .font: NSFont.systemFont(ofSize: baseFontSize, weight: .regular)
+            .font: Self.cachedFont(name: bodyFontName, size: baseFontSize)
         ]
         if marker == .checked {
             contentAttributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
@@ -411,18 +501,16 @@ final class MarkdownRenderer {
         context: MarkdownRenderContext
     ) {
         guard let line = safeRange(lineRange, in: attributed) else { return }
-        
-        attributed.enumerateAttribute(.attachment, in: line, options: []) { value, range, _ in
-            if let attachment = value as? MarkdownImageAttachment {
-                if attachment.bounds == .zero {
-                    attachment.bounds = CGRect(x: 0, y: 0, width: 300, height: 200)
-                }
+
+        attributed.enumerateAttribute(.attachment, in: line, options: []) { value, _, _ in
+            if let attachment = value as? MarkdownImageAttachment, attachment.bounds == .zero {
+                attachment.bounds = CGRect(x: 0, y: 0, width: 300, height: 200)
             }
         }
-        
+
         attributed.addAttributes([
             .foregroundColor: NSColor.clear,
-            .font: NSFont.systemFont(ofSize: 1)
+            .font: Self.cachedFont(size: 1)
         ], range: line)
 
         let paragraph = NSMutableParagraphStyle()
@@ -448,7 +536,7 @@ final class MarkdownRenderer {
 
         attributed.addAttributes([
             .foregroundColor: NSColor(theme.textMuted),
-            .font: NSFont.monospacedSystemFont(ofSize: baseFontSize, weight: .regular)
+            .font: Self.cachedFont(size: baseFontSize, mono: true)
         ], range: marker)
 
         attributed.addAttributes([
@@ -466,7 +554,11 @@ final class MarkdownRenderer {
         applyInline(inlines, to: attributed, theme: theme, context: context)
     }
 
-    func applyParagraphStyle(_ paragraph: NSParagraphStyle, lineRange: NSRange, to attributed: NSMutableAttributedString) {
+    func applyParagraphStyle(
+        _ paragraph: NSParagraphStyle,
+        lineRange: NSRange,
+        to attributed: NSMutableAttributedString
+    ) {
         guard let line = safeRange(lineRange, in: attributed) else { return }
         let needsExtend = (line.location + line.length < attributed.length)
         let length = needsExtend ? line.length + 1 : line.length
@@ -474,16 +566,24 @@ final class MarkdownRenderer {
         attributed.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
     }
 
-    func applyInline(_ inlines: [MarkdownInline], to attributed: NSMutableAttributedString, theme: AppTheme, context: MarkdownRenderContext) {
+    func applyInline(
+        _ inlines: [MarkdownInline],
+        to attributed: NSMutableAttributedString,
+        theme: AppTheme,
+        context: MarkdownRenderContext
+    ) {
         for inline in inlines {
             let fullInlineRange = NSRange(
                 location: inline.markerOpen.location,
                 length: NSMaxRange(inline.markerClose) - inline.markerOpen.location
             )
-            
+
             let showMarker = shouldShowMarker(fullInlineRange, selectedRange: context.selectedRange)
+            // 缓存 marker 字体（monospacedSystemFont 每次调用均触发 CoreText）
+            let markerFont = showMarker
+                ? Self.cachedFont(size: max(10, baseFontSize - 1), mono: true)
+                : Self.cachedFont(size: 0.01)
             let markerColor = showMarker ? NSColor(theme.textMuted) : NSColor.clear
-            let markerFont = showMarker ? NSFont.monospacedSystemFont(ofSize: max(10, baseFontSize - 1), weight: .regular) : NSFont.systemFont(ofSize: 0.01)
 
             let markers = inline.markerRanges.compactMap { safeRange($0, in: attributed) }
             for markerRange in markers {
@@ -499,12 +599,13 @@ final class MarkdownRenderer {
             case .bold:
                 attributed.addAttributes([
                     .foregroundColor: NSColor(theme.textMain),
-                    .font: NSFont.systemFont(ofSize: baseFontSize, weight: .bold)
+                    .font: Self.cachedFont(size: baseFontSize, weight: .bold)
                 ], range: contentRange)
 
             case .italic:
                 let base = bodyFont()
-                let italicFont = NSFontManager.shared.font(withFamily: base.familyName ?? base.fontName, traits: .italicFontMask, weight: 5, size: baseFontSize) ?? base
+                let family = base.familyName ?? base.fontName
+                let italicFont = Self.cachedItalicFont(family: family, size: baseFontSize, fallback: base)
                 attributed.addAttributes([
                     .foregroundColor: NSColor(theme.textItalic),
                     .font: italicFont
@@ -520,7 +621,7 @@ final class MarkdownRenderer {
             case .code:
                 attributed.addAttributes([
                     .foregroundColor: NSColor(theme.textSecondary),
-                    .font: NSFont.monospacedSystemFont(ofSize: max(10, baseFontSize - 0.5), weight: .medium),
+                    .font: Self.cachedFont(size: max(10, baseFontSize - 0.5), weight: .medium, mono: true),
                     .backgroundColor: NSColor(theme.bgCitation)
                 ], range: contentRange)
 
@@ -529,6 +630,7 @@ final class MarkdownRenderer {
                     .foregroundColor: NSColor(theme.textMain),
                     .backgroundColor: NSColor(theme.markerA)
                 ], range: contentRange)
+
             case .footnote:
                 attributed.addAttributes([
                     .foregroundColor: NSColor(theme.textMain),
@@ -539,26 +641,27 @@ final class MarkdownRenderer {
     }
 
     private func headingSize(for level: Int) -> CGFloat {
-        let ratios: [CGFloat] = [2.0, 12.0/7.0, 10.0/7.0, 9.0/7.0, 8.0/7.0, 15.0/14.0]
+        let ratios: [CGFloat] = [2.0, 12.0 / 7.0, 10.0 / 7.0, 9.0 / 7.0, 8.0 / 7.0, 15.0 / 14.0]
         let idx = max(0, min(level - 1, 5))
         return (baseFontSize * ratios[idx]).rounded()
     }
 
     func safeRange(_ range: NSRange, in attributed: NSAttributedString) -> NSRange? {
-        guard range.location >= 0, range.length >= 0, NSMaxRange(range) <= attributed.length else { return nil }
+        guard range.location >= 0, range.length >= 0,
+              NSMaxRange(range) <= attributed.length else { return nil }
         return range
     }
-    
+
     private func shouldShowMarkerForHeading(lineRange: NSRange, selectedRange: NSRange?) -> Bool {
         guard let selected = selectedRange else { return false }
-        
         if selected.length == 0 {
-            let location = selected.location
-            return location >= lineRange.location && location <= NSMaxRange(lineRange)
+            return selected.location >= lineRange.location && selected.location <= NSMaxRange(lineRange)
         }
         return lineRange.overlaps(selected)
     }
 }
+
+// MARK: -
 
 extension NSRange {
     func overlaps(_ other: NSRange) -> Bool {
