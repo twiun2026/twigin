@@ -79,9 +79,10 @@ final class MarkdownRenderer {
         guard !renderPlan.ranges.isEmpty else { return }
 
         textStorage.beginEditing()
+        let baseAttrs = baseAttributes(theme: context.theme)
         for range in renderPlan.ranges {
-            clearAttributes(in: range, storage: textStorage)
-            textStorage.addAttributes(baseAttributes(theme: context.theme), range: range)
+            guard range.length > 0 else { continue }
+            textStorage.setAttributes(baseAttrs, range: range)
         }
         for block in renderPlan.blocks {
             applyBlock(block, to: textStorage, theme: context.theme, context: context)
@@ -164,11 +165,8 @@ final class MarkdownRenderer {
         return NSRange(location: lowerBound, length: upperBound - lowerBound)
     }
 
-    private func clearAttributes(in range: NSRange, storage: NSTextStorage) {
-        guard range.length > 0 else { return }
-        for key in attributesToClear {
-            storage.removeAttribute(key, range: range)
-        }
+    private func resetAttributes(in range: NSRange, storage: NSTextStorage, theme: AppTheme) {        guard range.length > 0 else { return }
+        storage.setAttributes(baseAttributes(theme: theme), range: range)
     }
 
     func invalidateLayout(in textView: MarkdownNativeTextView, affectedRanges: [NSRange]) {
@@ -196,9 +194,6 @@ final class MarkdownRenderer {
             textLayoutManager.invalidateLayout(for: textRange)
         }
 
-        if affectedRanges.contains(where: { $0.location == 0 }) {
-            textLayoutManager.invalidateLayout(for: documentRange)
-        }
         textView.needsDisplay = true
     }
 
