@@ -7,11 +7,13 @@ extension MarkdownTextView.Coordinator {
         aiTask?.cancel()
         
         aiTask = Task { @MainActor [weak self, weak targetTextView] in
+            print(1)
             guard let self = self, let textView = targetTextView else { return }
+            print(2)
             guard let layoutManager = textView.textLayoutManager,
                   let contentManager = layoutManager.textContentManager as? NSTextContentStorage,
                   let storage = textView.textStorage else { return }
-            
+            print(3)
             let initialIndex = textView.selectedRange().location
             let docRange = contentManager.documentRange
             
@@ -60,9 +62,8 @@ extension MarkdownTextView.Coordinator {
             
         case 1:
             let prompt = """
-                    Summarize each paragraph of the following text individually. 
-                    Maintain the EXACT same number of paragraphs as the source text, separated by empty lines.
-                    Output ONLY the summary paragraphs without markdown formatting:
+                    Summarize the following single paragraph into 1-2 concise sentences. 
+                    Do not copy verbatim. Output plain text only:
 
                     \(selectedText)
                     """

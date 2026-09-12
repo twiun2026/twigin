@@ -266,25 +266,31 @@ final class MarkdownRenderer {
               let textContentManager = textLayoutManager.textContentManager else { return }
         guard !affectedRanges.isEmpty else { return }
 
-        let documentRange = textContentManager.documentRange
-        let storageLength = (textView.string as NSString).length
         let text = textView.string as NSString
-
+        let storageLength = text.length
+        guard storageLength > 0 else { return }
+        
+        let documentStart = textContentManager.documentRange.location
+        
         for affectedRange in affectedRanges {
-            guard affectedRange.length > 0 else { continue }
-            let end = NSMaxRange(affectedRange)
-            let nextParaEnd = paragraphEnd(after: end, in: text, upTo: storageLength)
-            let safeLength = max(nextParaEnd - affectedRange.location, affectedRange.length)
-            let safeRange = NSRange(location: affectedRange.location, length: safeLength)
+            guard affectedRange.location < storageLength else { continue }
+            // 规范化范围，并严格向上对齐到段落边界
+            let clampedRange = NSRange(
+                location: max(0, affectedRange.location),
+                length: min(affectedRange.length, storageLength - max(0, affectedRange.location))
+            )
+            let paragraphAlignedRange = text.paragraphRange(for: clampedRange)
 
-            guard let start = textContentManager.location(documentRange.location, offsetBy: safeRange.location),
-                  let endLoc = textContentManager.location(start, offsetBy: safeRange.length),
-                  let textRange = NSTextRange(location: start, end: endLoc) else { continue }
+            // 利用 documentStart 计算精确的 NSTextRange
+            guard let start = textContentManager.location(documentStart, offsetBy: paragraphAlignedRange.location),
+                  let end = textContentManager.location(start, offsetBy: paragraphAlignedRange.length),
+                  let textRange = NSTextRange(location: start, end: end) else {
+                continue
+            }
 
+            // 仅失效该段落的 Fragment
             textLayoutManager.invalidateLayout(for: textRange)
         }
-
-        textView.needsDisplay = true
     }
 
     private func mergeRanges(_ ranges: [NSRange]) -> [NSRange] {

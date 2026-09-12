@@ -321,15 +321,16 @@ struct MarkdownTextView: NSViewRepresentable {
                 needsFullCatchup = false
                 catchUpFullRender(expectedSerial: result.serial)
             } else if let diff = result.blockDiff, !diff.isEmpty {
+                // 增量渲染内部已调用 renderer.invalidateLayout(in:affectedRanges:)
                 renderIncremental(affectedRange: result.affectedRange, blockDiff: diff, allBlocks: result.allBlocks)
             } else {
                 hasPendingEdit = false
+                // 即便语法树没有生成 blockDiff（如普通文本输入），如果带有 affectedRange，
+                // 仅让受影响的段落局部排版生效（通常 TextKit 2 已自动处理，必要时仅失效最小区间）
+                if let affected = result.affectedRange {
+                    renderer.invalidateLayout(in: textView, affectedRanges: [affected])
+                }
             }
-
-            if let tlm = textView.textLayoutManager, let cm = tlm.textContentManager {
-                tlm.invalidateLayout(for: cm.documentRange)
-            }
-            textView.needsDisplay = true
         }
 
         private func catchUpFullRender(expectedSerial: UInt64) {
@@ -561,7 +562,7 @@ struct MarkdownTextView: NSViewRepresentable {
                         textView.insertText(autoInsertText, replacementRange: currentSelectedRange)
                         textView.didChangeText()
                     }
-                    
+                    print("to handleAiRequest")
                     handleAIRequest(aiRequest, targetTextView: textView)
 
                     return true

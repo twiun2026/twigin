@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     @EnvironmentObject private var themeManager: ThemeManager
@@ -12,6 +13,10 @@ struct SettingsView: View {
             FontSettingsView()
                 .tabItem {
                     Label("Font", systemImage: "textformat")
+                }
+            DataSettingsView()
+                .tabItem {
+                    Label("Data", systemImage: "externaldrive")
                 }
         }
         .frame(width: 480, height: 420)
@@ -288,6 +293,73 @@ struct LineSpacingPreview: View {
                              with: .color(.primary.opacity(0.22)))
                 y += lineHeight
                 i += 1
+            }
+        }
+    }
+}
+
+// MARK: - Data Settings
+
+struct DataSettingsView: View {
+    @EnvironmentObject private var themeManager: ThemeManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Local storage location row
+            HStack(spacing: 12) {
+                Text("Local Storage Location:")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+                    .frame(width: 150, alignment: .leading)
+
+                Button(action: openFolderPicker) {
+                    HStack(spacing: 6) {
+                        Text(themeManager.localStoragePath.isEmpty ? "Choose..." : themeManager.localStoragePath)
+                            .font(.system(size: 12))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .foregroundColor(.primary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(height: 28)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+
+            // Backup to cloud checkbox
+            HStack(spacing: 12) {
+                Toggle(isOn: Binding(
+                    get: { themeManager.backupToCloud },
+                    set: { themeManager.setBackupToCloud($0) }
+                )) {
+                    Text("Backup to Cloud:")
+                        .font(.system(size: 13))
+                }
+                .toggleStyle(.checkbox)
+
+                Spacer()
+            }
+
+            Spacer()
+        }
+        .padding(20)
+    }
+
+    private func openFolderPicker() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.title = "Choose Local Storage Folder"
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                DispatchQueue.main.async {
+                    themeManager.setLocalStoragePath(url.path)
+                }
             }
         }
     }

@@ -32,6 +32,8 @@ struct MainSplitView: View {
         }
     }
     
+    private func embedNote(noteId: NoteModel.ID){}
+    
     var body: some View {
         NavigationSplitView {
             // Left Pane: Folders
@@ -143,6 +145,10 @@ struct MainSplitView: View {
                                     if let folderId = selectedFolderId {
                                         deleteNote(note.id, in: folderId)
                                     }
+                                }
+                                Divider()
+                                Button("To Embed This Note", role: .destructive) {
+                                    embedNote(noteId: note.id)
                                 }
                             }
                     }

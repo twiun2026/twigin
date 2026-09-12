@@ -38,7 +38,7 @@ public final class AppleFoundationProvider: AIProvider {
     public func stream(request: AIRequest) -> AsyncThrowingStream<String, any Error> {
             let prompt = buildPrompt(for: request)
             let instructions = self.instructions
-
+print("prompt: \(prompt)")
             return AsyncThrowingStream { continuation in
                 Task {
                     do {

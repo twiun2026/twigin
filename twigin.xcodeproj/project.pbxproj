@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AA1CC4AA30545C8000F65DF9 /* ObjectBox-Sync.xcframework in Frameworks */ = {isa = PBXBuildFile; productRef = AA1CC4A930545C8000F65DF9 /* ObjectBox-Sync.xcframework */; };
 		AA8D0DF63005D4550048C2EA /* Markdown in Frameworks */ = {isa = PBXBuildFile; productRef = AA8D0DF53005D4550048C2EA /* Markdown */; };
 		AAA1B6653004157900663FB1 /* SQLite in Frameworks */ = {isa = PBXBuildFile; productRef = AAA1B6643004157900663FB1 /* SQLite */; };
 /* End PBXBuildFile section */
@@ -57,6 +58,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AAA1B6653004157900663FB1 /* SQLite in Frameworks */,
+				AA1CC4AA30545C8000F65DF9 /* ObjectBox-Sync.xcframework in Frameworks */,
 				AA8D0DF63005D4550048C2EA /* Markdown in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -113,6 +115,7 @@
 			packageProductDependencies = (
 				AAA1B6643004157900663FB1 /* SQLite */,
 				AA8D0DF53005D4550048C2EA /* Markdown */,
+				AA1CC4A930545C8000F65DF9 /* ObjectBox-Sync.xcframework */,
 			);
 			productName = twigin;
 			productReference = AAA1B64530040D1600663FB1 /* twigin.app */;
@@ -145,6 +148,7 @@
 			packageReferences = (
 				AAA1B6633004157900663FB1 /* XCRemoteSwiftPackageReference "SQLite.swift" */,
 				AA8D0DF43005D4550048C2EA /* XCRemoteSwiftPackageReference "swift-markdown" */,
+				AA1CC4A830545C8000F65DF9 /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AAA1B64630040D1600663FB1 /* Products */;
@@ -405,6 +409,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		AA1CC4A830545C8000F65DF9 /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/objectbox/objectbox-swift-spm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 5.3.0;
+			};
+		};
 		AA8D0DF43005D4550048C2EA /* XCRemoteSwiftPackageReference "swift-markdown" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/swiftlang/swift-markdown";
@@ -424,6 +436,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		AA1CC4A930545C8000F65DF9 /* ObjectBox-Sync.xcframework */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA1CC4A830545C8000F65DF9 /* XCRemoteSwiftPackageReference "objectbox-swift-spm" */;
+			productName = "ObjectBox-Sync.xcframework";
+		};
 		AA8D0DF53005D4550048C2EA /* Markdown */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = AA8D0DF43005D4550048C2EA /* XCRemoteSwiftPackageReference "swift-markdown" */;
