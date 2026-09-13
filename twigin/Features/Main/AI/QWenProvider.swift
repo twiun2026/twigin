@@ -11,8 +11,8 @@ public final class QWenProvider: AIProvider {
         public let timeoutInterval: TimeInterval
 
         public init(
-            endpoint: URL = URL(string: "http://127.0.0.1:11434/v1/chat/completions")!,
-            apiKey: String = "ollama",
+            endpoint: URL = URL(string: "https://ws-1ac7g9swxc2dszw3.ap-southeast-1.maas.aliyuncs.com/v1/chat/completions")!,
+            apiKey: String = "",
             model: String = "qwen3:8b",
             timeoutInterval: TimeInterval = 120
         ) {
@@ -28,7 +28,7 @@ public final class QWenProvider: AIProvider {
 
     public init(configuration: Configuration = Configuration()) {
         self.configuration = configuration
-        
+
         let sessionConfig = URLSessionConfiguration.default
         sessionConfig.timeoutIntervalForRequest = configuration.timeoutInterval
         sessionConfig.timeoutIntervalForResource = configuration.timeoutInterval * 2

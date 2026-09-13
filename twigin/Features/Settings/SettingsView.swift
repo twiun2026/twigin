@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Foundation
 
 struct SettingsView: View {
     @EnvironmentObject private var themeManager: ThemeManager
@@ -17,6 +18,11 @@ struct SettingsView: View {
             DataSettingsView()
                 .tabItem {
                     Label("Data", systemImage: "externaldrive")
+                }
+            // Artificial Intelligence settings tab
+            AISettingsView()
+                .tabItem {
+                    Label("Artificial Intelligence", systemImage: "brain")
                 }
         }
         .frame(width: 480, height: 420)
@@ -360,6 +366,165 @@ struct DataSettingsView: View {
                 DispatchQueue.main.async {
                     themeManager.setLocalStoragePath(url.path)
                 }
+            }
+        }
+    }
+}
+
+// MARK: - AI Settings
+
+struct AISettingsView: View {
+    @EnvironmentObject private var themeManager: ThemeManager
+
+    @State private var apiKey: String = ""
+    @State private var showKey: Bool = false
+    @State private var showSavedAlert: Bool = false
+    @State private var showErrorAlert: Bool = false
+    @State private var errorMessage: String = ""
+    @State private var isTesting: Bool = false
+    @State private var showTestResultAlert: Bool = false
+    @State private var testResultMessage: String = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Qwen API Key")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 8) {
+                if showKey {
+                    TextField("Enter Qwen API Key", text: $apiKey)
+                        .textFieldStyle(.plain)
+                        .frame(height: 28)
+                } else {
+                    SecureField("Enter Qwen API Key", text: $apiKey)
+                        .textFieldStyle(.plain)
+                        .frame(height: 28)
+                }
+
+                Button(action: { showKey.toggle() }) {
+                    Image(systemName: showKey ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 8)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button(action: { Task { await testKey() } }) {
+                    if isTesting {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .frame(width: 20, height: 20)
+                    } else {
+                        Text("Test Key")
+                    }
+                }
+                .buttonStyle(.bordered)
+
+                Button(action: { Task { await saveKey() } }) {
+                    Text("Save")
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+            }
+
+            Spacer()
+        }
+        .padding(20)
+        .onAppear {
+            Task { @MainActor in
+                do {
+                    if let saved = try await KeychainManager.shared.getApiKey() {
+                        apiKey = saved
+                    }
+                } catch {
+                    errorMessage = error.localizedDescription
+                    showErrorAlert = true
+                }
+            }
+        }
+        .alert("Saved", isPresented: $showSavedAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("API Key saved to Keychain.")
+        }
+        .alert("Error", isPresented: $showErrorAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(errorMessage)
+        }
+        .alert("Test Result", isPresented: $showTestResultAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(testResultMessage)
+        }
+    }
+
+    private func saveKey() async {
+        do {
+            try await KeychainManager.shared.save(apiKey: apiKey)
+            await MainActor.run { showSavedAlert = true }
+        } catch {
+            await MainActor.run {
+                errorMessage = error.localizedDescription
+                showErrorAlert = true
+            }
+        }
+    }
+
+    private func testKey() async {
+        isTesting = true
+        defer { Task { @MainActor in isTesting = false } }
+
+        // Lightweight validation: send a non-streaming POST to verify auth
+        guard !apiKey.isEmpty else {
+            await MainActor.run {
+                testResultMessage = "API Key is empty. Please enter a key before testing."
+                showTestResultAlert = true
+            }
+            return
+        }
+
+        let endpoint = URL(string: "https://ws-1ac7g9swxc2dszw3.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/embeddings")!
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+        let body: [String: Any] = [
+            "model": "qwen3.7-text-embedding",
+            "input": "ping",
+        ]
+
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse {
+                if (200..<300).contains(http.statusCode) {
+                    await MainActor.run {
+                        testResultMessage = "Key appears valid (HTTP \(http.statusCode))."
+                        showTestResultAlert = true
+                    }
+                } else {
+                    let serverMsg = String(data: data, encoding: .utf8) ?? "(no body)"
+                    await MainActor.run {
+                        testResultMessage = "Server returned HTTP \(http.statusCode): \(serverMsg)"
+                        showTestResultAlert = true
+                    }
+                }
+            } else {
+                await MainActor.run {
+                    testResultMessage = "Non-HTTP response received."
+                    showTestResultAlert = true
+                }
+            }
+        } catch {
+            await MainActor.run {
+                testResultMessage = "Network error: \(error.localizedDescription)"
+                showTestResultAlert = true
             }
         }
     }

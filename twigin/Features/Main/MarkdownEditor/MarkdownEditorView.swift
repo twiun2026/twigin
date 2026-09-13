@@ -202,6 +202,28 @@ struct MarkdownTextView: NSViewRepresentable {
             self.parent = parent
             self.renderer = MarkdownRenderer()
             super.init()
+
+            // Resolve Keychain-stored QWen API key and update provider at runtime.
+            Task {
+                do {
+                    if let key = try await KeychainManager.shared.getApiKey(), !key.isEmpty {
+                        let provider = QWenProvider(configuration: QWenProvider.Configuration(apiKey: key))
+                        await aiQWenService.updateProvider(provider)
+                    } else {
+                        // No key found — inform the user once.
+                        let alert = NSAlert()
+                        alert.messageText = "Qwen API Key missing"
+                        alert.informativeText = "No Qwen API Key was found in the Keychain. Please open Settings → Artificial Intelligence and save your API Key so the Qwen provider can authenticate requests."
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                    }
+                } catch {
+                    let alert = NSAlert(error: error)
+                    alert.informativeText = "Failed to read Qwen API Key from Keychain: \(error.localizedDescription)"
+                    alert.runModal()
+                }
+            }
         }
 
         func bind(textView: MarkdownNativeTextView) {
