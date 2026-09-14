@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ObjectBox
 
 enum ActiveFocusColumn: Hashable {
@@ -14,6 +15,7 @@ struct MainSplitView: View {
     @State private var selectedFolderId: FolderModel.ID?
     @State private var selectedNoteId: NoteModel.ID?
     @State private var editorFocusRequest = UUID()
+    @State private var showConfetti: Bool = false
     
     @FocusState private var isNewFolderFocused: Bool
     @FocusState private var focusedColumn: ActiveFocusColumn?
@@ -30,6 +32,40 @@ struct MainSplitView: View {
         if selectedNoteId == noteId {
             selectedNoteId = nil
             focusedColumn = nil
+        }
+        // Also remove any corresponding vector record from ObjectBox (if present).
+        Task {
+            do {
+                let fm = FileManager.default
+                let appSupport = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+                let dir = appSupport.appendingPathComponent(Bundle.main.bundleIdentifier ?? "twigin").path
+
+                let store = try Store(directoryPath: dir)
+                let box = store.box(for: ArticleDataModel.self)
+
+                // Query by noteId
+                let q = try box.query { ArticleDataModel.noteId == noteId }.build()
+                let found = try q.find()
+                if !found.isEmpty {
+                    // Remove all matching entities
+                    for entity in found {
+                        try box.remove(entity.id)
+                    }
+
+                    // Inform user of successful deletion from local vector DB
+                    let alert = NSAlert()
+                    alert.messageText = "Vector record deleted"
+                    alert.informativeText = "The corresponding vector record for the note was removed from the local vector database."
+                    alert.alertStyle = .informational
+                    alert.addButton(withTitle: "OK")
+                    alert.runModal()
+                }
+
+                store.close()
+            } catch {
+                let alert = NSAlert(error: error)
+                alert.runModal()
+            }
         }
     }
     
@@ -49,59 +85,16 @@ struct MainSplitView: View {
                 }
 
                 let raw = fullNote.documentJson ?? ""
-                let lines = raw.components(separatedBy: .newlines)
 
-                // Parse metadata according to specification
-                // 1st line: title starting with '#'
-                var title = "Untitled"
-                if let first = lines.first?.trimmingCharacters(in: .whitespaces) , !first.isEmpty {
-                    var t = first
-                    while t.hasPrefix("#") { t.removeFirst() }
-                    title = t.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
+                // Use ArticleMetadataParser to extract metadata and remaining content.
+                let parsed = ArticleMetadataParser().parse(raw)
 
-                // 2nd line: publish Date: ...
-                var publishDate = Date()
-                if lines.count > 1 {
-                    let second = lines[1].trimmingCharacters(in: .whitespaces)
-                    if second.lowercased().hasPrefix("publish date:") {
-                        let idx = second.index(second.startIndex, offsetBy: "publish Date:".count)
-                        let dateStr = second[idx...].trimmingCharacters(in: .whitespacesAndNewlines)
-                        // Try several common formats
-                        if let d = ISO8601DateFormatter().date(from: String(dateStr)) {
-                            publishDate = d
-                        } else {
-                            let df = DateFormatter()
-                            df.locale = Locale(identifier: "en_US_POSIX")
-                            df.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
-                            if let d = df.date(from: String(dateStr)) {
-                                publishDate = d
-                            } else {
-                                df.dateFormat = "yyyy-MM-dd"
-                                if let d = df.date(from: String(dateStr)) {
-                                    publishDate = d
-                                } else {
-                                    // fallback leave as now
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 3rd line: url: ...
-                var urlString: String? = nil
-                if lines.count > 2 {
-                    let third = lines[2].trimmingCharacters(in: .whitespaces)
-                    if third.lowercased().hasPrefix("url:") {
-                        let idx = third.index(third.startIndex, offsetBy: "url:".count)
-                        let u = third[idx...].trimmingCharacters(in: .whitespacesAndNewlines)
-                        urlString = u.isEmpty ? nil : String(u)
-                    }
-                }
-
-                // 4th line onward => content for embedding
-                let contentLines = lines.count > 3 ? Array(lines[3...]) : []
-                let content = contentLines.joined(separator: "\n")
+                // Extract fields required by the embedding/upsert flow
+                let title = parsed.title
+                let publishDate = parsed.publishDate
+                let urlString = parsed.url
+                let tags: [String] = parsed.tags
+                let content = parsed.content
 
                 // 1) Chunk content into ~300-char segments with overlap
                 func chunk(_ text: String, maxLen: Int = 300, overlap: Int = 50) -> [String] {
@@ -133,7 +126,7 @@ struct MainSplitView: View {
                     return
                 }
 
-                // 2) Call embedding API
+                // 2) Call embedding API in batches (max 20 per request)
                 guard let apiKey = try await KeychainManager.shared.getApiKey(), !apiKey.isEmpty else {
                     let alert = NSAlert()
                     alert.messageText = "Qwen API Key missing"
@@ -145,43 +138,66 @@ struct MainSplitView: View {
                 }
 
                 let endpoint = URL(string: "https://ws-1ac7g9swxc2dszw3.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/embeddings")!
-                var request = URLRequest(url: endpoint)
-                request.httpMethod = "POST"
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
 
-                let body: [String: Any] = [
-                    "model": "qwen3.7-text-embedding",
-                    "input": chunks
-                ]
-                
-                request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let http = response as? HTTPURLResponse else {
-                    let alert = NSAlert(error: NSError(domain: "EmbedError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Non-HTTP response from embedding service"]))
-                    alert.runModal()
-                    return
-                }
-
-                if !(200..<300).contains(http.statusCode) {
-                    let serverMsg = String(data: data, encoding: .utf8) ?? "(no body)"
-                    let alert = NSAlert()
-                    alert.messageText = "Embedding failed"
-                    alert.informativeText = "Server returned HTTP \(http.statusCode): \(serverMsg)"
-                    alert.alertStyle = .warning
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
-                    return
-                }
-
-                // Parse embedding response
                 struct EmbeddingItem: Codable { let embedding: [Float] }
                 struct EmbeddingResp: Codable { let data: [EmbeddingItem] }
 
                 let decoder = JSONDecoder()
-                let embResp = try decoder.decode(EmbeddingResp.self, from: data)
-                guard !embResp.data.isEmpty else {
+                var vectors: [[Float]] = []
+                let batchSize = 20
+
+                for start in stride(from: 0, to: chunks.count, by: batchSize) {
+                    let end = min(start + batchSize, chunks.count)
+                    let batch = Array(chunks[start..<end])
+
+                    var request = URLRequest(url: endpoint)
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+
+                    let body: [String: Any] = [
+                        "model": "qwen3.7-text-embedding",
+                        "input": batch
+                    ]
+                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                    let (data, response) = try await URLSession.shared.data(for: request)
+                    guard let http = response as? HTTPURLResponse else {
+                        let alert = NSAlert(error: NSError(domain: "EmbedError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Non-HTTP response from embedding service"]))
+                        alert.runModal()
+                        return
+                    }
+
+                    if !(200..<300).contains(http.statusCode) {
+                        let serverMsg = String(data: data, encoding: .utf8) ?? "(no body)"
+                        let alert = NSAlert()
+                        alert.messageText = "Embedding failed"
+                        alert.informativeText = "Server returned HTTP \(http.statusCode): \(serverMsg)"
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                        return
+                    }
+
+                    let embResp = try decoder.decode(EmbeddingResp.self, from: data)
+                    if embResp.data.isEmpty {
+                        let alert = NSAlert()
+                        alert.messageText = "No embeddings"
+                        alert.informativeText = "Embedding API returned no vectors for a batch."
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                        return
+                    }
+
+                    // Append embeddings preserving order
+                    for item in embResp.data {
+                        vectors.append(item.embedding)
+                    }
+                }
+
+                // Validate we got embeddings
+                guard !vectors.isEmpty else {
                     let alert = NSAlert()
                     alert.messageText = "No embeddings"
                     alert.informativeText = "Embedding API returned no vectors."
@@ -192,7 +208,6 @@ struct MainSplitView: View {
                 }
 
                 // Aggregate embeddings into a single vector (mean pooling)
-                let vectors = embResp.data.map { $0.embedding }
                 let count = Float(vectors.count)
                 guard let dim = vectors.first?.count else {
                     throw NSError(domain: "EmbedError", code: -2, userInfo: [NSLocalizedDescriptionKey: "Unexpected embedding shape"]) }
@@ -200,9 +215,11 @@ struct MainSplitView: View {
                 for v in vectors {
                     if v.count == dim {
                         for i in 0..<dim { avg[i] += v[i] }
-                    }
+                    } else {
+                        throw NSError(domain: "EmbedError", code: -3, userInfo: [NSLocalizedDescriptionKey: "Inconsistent embedding dimension returned by API"]) }
                 }
                 for i in 0..<dim { avg[i] /= count }
+                
 
                 // 3) ObjectBox Upsert
                 // Create a store in Application Support/<bundle-id>/objectbox
@@ -211,36 +228,33 @@ struct MainSplitView: View {
                 let dir = appSupport.appendingPathComponent(Bundle.main.bundleIdentifier ?? "twigin").path
 
                 let store = try Store(directoryPath: dir)
-                let box = store.box(for: NewsArticleDataModel.self)
+                let box = store.box(for: ArticleDataModel.self)
 
                 // Query by noteId
-                let q = try box.query { NewsArticleDataModel.noteId == noteId }.build()
+                let q = try box.query { ArticleDataModel.noteId == noteId }.build()
                 let found = try q.find()
                 if let existing = found.first {
                     existing.noteId = noteId
                     existing.title = title
                     existing.content = content
                     existing.url = urlString
+                    existing.tags = tags
                     existing.publishDate = publishDate
                     existing.embedding = avg
                     try box.put(existing)
                 } else {
-                    let entity = NewsArticleDataModel(noteId: noteId, title: title, content: content, url: urlString, publishDate: publishDate, embedding: avg)
+                    let entity = ArticleDataModel(noteId: noteId, title: title, content: content, url: urlString, tags: tags, publishDate: publishDate, embedding: avg)
                     try box.put(entity)
                 }
-
-                // Inform user
-                let alert = NSAlert()
-                alert.messageText = "Embedding saved"
-                alert.informativeText = "Embeddings for the note were computed and stored successfully."
-                alert.alertStyle = .informational
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
 
                 //debug print ObjectBox contents for verification
                 debugPrintObjectBox(store: store)
                 // Note: leaving store open is fine; closing explicitly if desired:
                 store.close()
+                // trigger confetti notification in the right pane
+                await MainActor.run {
+                    showAnimationNotification()
+                }
 
             } catch {
                 let alert = NSAlert(error: error)
@@ -257,7 +271,7 @@ struct MainSplitView: View {
             return
         }
         do {
-            let box = store.box(for: NewsArticleDataModel.self)
+            let box = store.box(for: ArticleDataModel.self)
             
             print("===== ObjectBox 数据总览 =====")
             let totalCount = try box.count()
@@ -265,7 +279,6 @@ struct MainSplitView: View {
             
             let articles = try box.all()
             for article in articles{
-                print("--------------------------------")
                 print("ID: \(article.noteId)")
                 print("Title: \(article.title)")
                 print("Date: \(article.publishDate)")
@@ -278,6 +291,133 @@ struct MainSplitView: View {
         } catch {
             print("调试打印 ObjectBox 数据出错: \(error)")
         }
+    }
+
+    // Trigger an ephemeral confetti-style animation in the right pane.
+    private func showAnimationNotification() {
+        // Animate show/hide to make the overlay fade in/out reliably
+        withAnimation(.easeOut(duration: 0.25)) {
+            showConfetti = true
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            await MainActor.run {
+                withAnimation(.easeIn(duration: 0.25)) {
+                    showConfetti = false
+                }
+            }
+        }
+    }
+
+    // A lightweight SwiftUI confetti particle system. Uses Canvas + TimelineView
+    // to animate many colored particles; optimized for short-lived 2s playback.
+    private struct ConfettiView: View {
+        struct Particle {
+            let id = UUID()
+            let color: Color
+            let x0: CGFloat
+            let y0: CGFloat
+            let vx: CGFloat
+            let vy: CGFloat
+            let rot0: Double
+            let rotSpeed: Double
+            let size: CGFloat
+            let shapeRect: CGRect
+        }
+
+        @State private var particles: [Particle] = []
+        @State private var startDate: Date? = nil
+        private let colors: [Color] = [
+            .red, .pink, .orange, .yellow, .green, .blue, .purple
+        ]
+
+        private func makeParticles(in size: CGSize, count: Int = 80) -> [Particle] {
+            var out: [Particle] = []
+            let centerX = size.width * 0.5
+            // Start near the bottom of the screen to shoot upwards
+            let startY = size.height * 0.95
+            for _ in 0..<count {
+                let angle = Double.random(in: (-Double.pi / 2.0 - 0.6)...(-Double.pi / 2.0 + 0.6))
+                let speed = CGFloat.random(in: 120...520)
+                let vx = CGFloat(cos(angle)) * speed
+                let vy = CGFloat(sin(angle)) * speed
+                let sz = CGFloat.random(in: 6...18)
+                let xJitter = CGFloat.random(in: -80...80)
+                let color = colors.randomElement() ?? .blue
+                let rot0 = Double.random(in: 0...360)
+                let rotSpeed = Double.random(in: -360...360)
+                let rect = CGRect(x: centerX + xJitter - sz/2, y: startY - sz/2, width: sz, height: sz * CGFloat.random(in: 0.7...1.6))
+                out.append(Particle(color: color, x0: rect.midX, y0: rect.midY, vx: vx, vy: vy, rot0: rot0, rotSpeed: rotSpeed, size: sz, shapeRect: rect))
+            }
+            return out
+        }
+
+        var body: some View {
+            GeometryReader { geo in
+                TimelineView(.animation) { timeline in
+                    let now = timeline.date
+                    Canvas { context, size in
+                        guard let sd = startDate else {
+                            DispatchQueue.main.async {
+                                if startDate == nil {
+                                    particles = makeParticles(in: size)
+                                    startDate = Date()
+                                }
+                            }
+                            return
+                        }
+                        // compute elapsed time since particles were created (cap at 2s)
+                        let dt = CGFloat(min(2.0, max(0.0, now.timeIntervalSince(sd))))
+                        let gravity: CGFloat = 600
+
+                        for p in particles {
+                            let x = p.x0 + p.vx * dt
+                            let y = p.y0 + p.vy * dt + 0.5 * gravity * dt * dt
+                            let rot = p.rot0 + p.rotSpeed * Double(dt)
+                            
+                            context.drawLayer { localContext in
+                                localContext.translateBy(x: x, y: y)
+                                localContext.rotate(by: .degrees(rot))
+                                let rect = CGRect(x: -p.size/2, y: -p.size/2, width: p.size, height: p.size * 1.2)
+                                let path = Path(roundedRect: rect, cornerRadius: p.size * 0.2)
+                                let opacity = max(0.0, 1.0 - Double(dt / 2.0))
+                                localContext.fill(path, with: .color(p.color.opacity(opacity)))
+                                localContext.stroke(path, with: .color(.white.opacity(0.06)), lineWidth: 0.5)
+                            }
+                        }
+                    }
+                    .allowsHitTesting(false)
+                    .compositingGroup()
+                }
+                .onAppear {
+                    if geo.size.width > 0 {
+                        particles = makeParticles(in: geo.size)
+                        startDate = Date()
+                    }
+                }
+                .onChange(of: geo.size) { oldSize, newSize in
+                    if newSize.width > 0 {
+                        particles = makeParticles(in: newSize)
+                        startDate = Date()
+                    }
+                }
+            }
+            .ignoresSafeArea()
+        }
+    }
+
+    // A native AppKit view wrapper to solve the SwiftUI-AppKit "airspace" rendering conflict.
+    // By wrapping ConfettiView in an NSHostingView subview, it becomes a sibling to
+    // MarkdownEditorView's NSScrollView and is drawn correctly on top of the editor.
+    private struct ConfettiHostView: NSViewRepresentable {
+        func makeNSView(context: Context) -> NSHostingView<ConfettiView> {
+            let view = NSHostingView(rootView: ConfettiView())
+            view.wantsLayer = true
+            view.layer?.backgroundColor = NSColor.clear.cgColor
+            return view
+        }
+
+        func updateNSView(_ nsView: NSHostingView<ConfettiView>, context: Context) {}
     }
     
     var body: some View {
@@ -404,6 +544,13 @@ struct MainSplitView: View {
                 .focused($focusedColumn,equals: .noteList)
                 .environment(\.defaultMinListRowHeight, 40)
                 .toolbar(id: "notes_toolbar") {
+                    ToolbarItem(id: "test_confetti", placement: .navigation) {
+                        Button {
+                            showAnimationNotification()
+                        } label: {
+                            Label("Test Confetti", systemImage: "sparkles")
+                        }
+                    }
                     ToolbarItem(id: "new_note", placement: .primaryAction) {
                         Button {
                             if let folderId = selectedFolderId {
@@ -418,20 +565,29 @@ struct MainSplitView: View {
             }
             .navigationTitle("Notes")
         } detail: {
-            // Right Pane: Detail
-            if let selectedNoteId = selectedNoteId {
-                NoteEditorView(
-                    noteId: selectedNoteId,
-                    viewModel: noteViewModel,
-                    focusRequest: editorFocusRequest
-                )
-                    .background(themeManager.currentTheme.bgNoteEditor)
-            } else {
-                Text("No note selected")
-                    .foregroundColor(themeManager.currentTheme.textMuted)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(themeManager.currentTheme.bgNoteEditor)
+            // Right Pane: Detail (wrapped to allow confetti overlay)
+            ZStack {
+                if let selectedNoteId = selectedNoteId {
+                    NoteEditorView(
+                        noteId: selectedNoteId,
+                        viewModel: noteViewModel,
+                        focusRequest: editorFocusRequest
+                    )
+                } else {
+                    Text("No note selected")
+                        .foregroundColor(themeManager.currentTheme.textMuted)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
+                if showConfetti {
+                    ConfettiHostView()
+                        .transition(.opacity)
+                        .zIndex(1)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                }
             }
+            .background(themeManager.currentTheme.bgNoteEditor)
         }
         .onAppear {
             folderViewModel.setupAndLoad()
