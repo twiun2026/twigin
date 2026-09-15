@@ -38,21 +38,36 @@ struct MainSplitViewMiddlePart: View {
                         .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                         .padding(.bottom, 8)
                         .contextMenu {
-                            Button("New Note") {
+                            Button {
                                 if let folderId = selectedFolderId {
                                     createAndFocusNewNote(folderId)
                                 }
+                            } label: {
+                                Label("New Note", systemImage: "plus")
                             }
-                            Button("Pin Note") { }
+
+                            Button {
+                                // pin action placeholder
+                            } label: {
+                                Label("Pin Note", systemImage: "pin")
+                            }
+
                             Divider()
-                            Button("Delete Note", role: .destructive) {
+
+                            Button(role: .destructive) {
                                 if let folderId = selectedFolderId {
                                     deleteNote(note.id, folderId)
                                 }
+                            } label: {
+                                Label("Delete Note", systemImage: "trash")
                             }
+
                             Divider()
-                            Button("To Embed This Note", role: .destructive) {
+
+                            Button {
                                 embedNote(note.id)
+                            } label: {
+                                Label("To Embed This Note", systemImage: "brain")
                             }
                         }
                 }

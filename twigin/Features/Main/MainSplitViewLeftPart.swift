@@ -57,7 +57,7 @@ struct MainSplitViewLeftPart: View {
 
             VStack(spacing: 0) {
                 HStack {
-                    Label("AI Context Zone", systemImage: "sparkles.square.fill")
+                    Label("AI Workspace", systemImage: "sparkles.square.fill")
                         .font(.caption)
                         .bold()
                         .foregroundColor(themeManager.currentTheme.textMain)
@@ -202,25 +202,59 @@ struct FolderListItemView: View {
         .contextMenu {
             let isSystemFolder = ["recently_deleted", "__prompts__", "__source_library__"].contains(folder.folderId)
             if !isSystemFolder {
-                Button("Rename Folder") {
+                Button {
                     folderViewModel.editingFolderId = folder.id
+                } label: {
+                    Label("Rename Folder", systemImage: "pencil")
                 }
-                Button("Delete Folder", role: .destructive) {
+                Button(role: .destructive) {
                     folderViewModel.deleteFolder(id: folder.id)
+                } label: {
+                    Label("Delete Folder", systemImage: "trash")
                 }
                 Divider()
             }
-            Button("New Folder") { folderViewModel.startCreatingNewFolder() }
+            Button {
+                folderViewModel.startCreatingNewFolder()
+            } label: {
+                Label("New Folder", systemImage: "folder.badge.plus")
+            }
             Divider()
-            Button("Share Folder") { }
+            Button {
+                // share action placeholder
+            } label: {
+                Label("Share Folder", systemImage: "square.and.arrow.up")
+            }
             Divider()
-            Menu("Sort By") {
-                Button("Default (Date Edited)") { folderViewModel.sortOption = .dateEdited }
-                Button("Dated Created") { folderViewModel.sortOption = .dateCreated }
-                Button("Title") { folderViewModel.sortOption = .title }
+            Menu {
+                Button {
+                    folderViewModel.sortOption = .dateEdited
+                } label: {
+                    Label("Default (Date Edited)", systemImage: "clock")
+                }
+                Button {
+                    folderViewModel.sortOption = .dateCreated
+                } label: {
+                    Label("Dated Created", systemImage: "calendar")
+                }
+                Button {
+                    folderViewModel.sortOption = .title
+                } label: {
+                    Label("Title", systemImage: "textformat")
+                }
                 Divider()
-                Button("Newest First") { folderViewModel.sortOption = .newestFirst }
-                Button("Oldest First") { folderViewModel.sortOption = .oldestFirst }
+                Button {
+                    folderViewModel.sortOption = .newestFirst
+                } label: {
+                    Label("Newest First", systemImage: "arrow.up")
+                }
+                Button {
+                    folderViewModel.sortOption = .oldestFirst
+                } label: {
+                    Label("Oldest First", systemImage: "arrow.down")
+                }
+            } label: {
+                Label("Sort By", systemImage: "arrow.up.arrow.down")
             }
         }
     }
