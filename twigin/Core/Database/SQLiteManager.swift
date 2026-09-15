@@ -229,6 +229,33 @@ final class SQLiteManager: @unchecked Sendable {
         """)
 
         // =====================================================
+        // 8. Prompts (local prompt templates)
+        // =====================================================
+        try db.execute("""
+        CREATE TABLE IF NOT EXISTS prompts (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            category TEXT,
+            content TEXT NOT NULL,
+            variables TEXT,
+            target_style TEXT,
+            is_system INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        try db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_prompts_category
+        ON prompts(category);
+        """)
+
+        try db.execute("""
+        CREATE INDEX IF NOT EXISTS idx_prompts_is_system
+        ON prompts(is_system);
+        """)
+
+        // =====================================================
         // 6. FTS5
         // =====================================================
         try db.execute("""

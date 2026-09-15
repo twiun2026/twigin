@@ -11,6 +11,7 @@ struct MainSplitView: View {
     @EnvironmentObject private var themeManager: ThemeManager
     @StateObject private var folderViewModel = FolderListViewModel()
     @StateObject private var noteViewModel = NoteListViewModel()
+    @StateObject private var promptPopoverVM = PromptPopoverViewModel()
     
     @State private var selectedFolderId: FolderModel.ID?
     @State private var selectedNoteId: NoteModel.ID?
@@ -568,10 +569,14 @@ struct MainSplitView: View {
             // Right Pane: Detail (wrapped to allow confetti overlay)
             ZStack {
                 if let selectedNoteId = selectedNoteId {
+                    // Determine current folder title for the selected folder
+                    let currentFolderTitle = folderViewModel.folders.first(where: { $0.folderId == selectedFolderId })?.folderTitle
                     NoteEditorView(
                         noteId: selectedNoteId,
                         viewModel: noteViewModel,
-                        focusRequest: editorFocusRequest
+                        focusRequest: editorFocusRequest,
+                        folderTitle: currentFolderTitle,
+                        promptPopoverVM: promptPopoverVM
                     )
                 } else {
                     Text("No note selected")
@@ -588,6 +593,22 @@ struct MainSplitView: View {
                 }
             }
             .background(themeManager.currentTheme.bgNoteEditor)
+            .toolbar{
+                ToolbarItem(id: "note_info", placement: .primaryAction) {
+                    Button {
+                        focusedColumn = .noteList
+                        NSApp.keyWindow?.makeFirstResponder(nil)
+                        promptPopoverVM.isPresented.toggle()
+                    } label: {
+                        Label("Note Info", systemImage: "info.circle")
+                    }
+                    .disabled(selectedNoteId == nil)
+                    .popover(isPresented: $promptPopoverVM.isPresented, arrowEdge: .bottom) {
+                        PromptPopoverView(vm: promptPopoverVM)
+                            .environmentObject(themeManager)
+                    }
+                }
+            }
         }
         .onAppear {
             folderViewModel.setupAndLoad()

@@ -10,6 +10,8 @@ struct MarkdownEditorView: View {
     var fontSize: CGFloat = 14
     var lineSpacing: CGFloat = 0
     var focusRequest: UUID? = nil
+    // Optional Prompt popover VM to attach for variable extraction
+    var promptPopoverVM: PromptPopoverViewModel? = nil
 
     var body: some View {
         MarkdownTextView(
@@ -18,7 +20,8 @@ struct MarkdownEditorView: View {
             fontName: fontName,
             fontSize: fontSize,
             lineSpacing: lineSpacing,
-            focusRequest: focusRequest
+            focusRequest: focusRequest,
+            promptVM: promptPopoverVM
         )
     }
 }
@@ -30,9 +33,10 @@ struct MarkdownTextView: NSViewRepresentable {
     var fontSize: CGFloat = 14
     var lineSpacing: CGFloat = 0
     var focusRequest: UUID? = nil
+    var promptVM: PromptPopoverViewModel? = nil
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
+        Coordinator(parent: self, promptVM: promptVM)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
@@ -56,6 +60,7 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.font = Self.resolvedFont(for: fontName, size: fontSize)
 
         context.coordinator.bind(textView: textView)
+        // If a prompt VM was provided, the coordinator will attach it when binding
         textView.textStorage?.delegate = context.coordinator
 
         context.coordinator.lastRenderedTheme = theme
@@ -150,10 +155,12 @@ struct MarkdownTextView: NSViewRepresentable {
         ]
     }
 
-    @MainActor final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate, NSTextContentStorageDelegate, @unchecked Sendable {
+        @MainActor final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate, NSTextContentStorageDelegate, @unchecked Sendable {
     
-        var parent: MarkdownTextView
+         var parent: MarkdownTextView
         weak var textView: MarkdownNativeTextView?
+         // Weak reference to the PromptPopoverViewModel to avoid retain cycles
+         private weak var promptPopoverVM: PromptPopoverViewModel?
         
         //渲染状态
         var lastRenderedTheme: AppTheme? = nil
@@ -198,8 +205,9 @@ struct MarkdownTextView: NSViewRepresentable {
             }
         }
 
-        init(parent: MarkdownTextView) {
-            self.parent = parent
+         init(parent: MarkdownTextView, promptVM: PromptPopoverViewModel?) {
+             self.parent = parent
+             self.promptPopoverVM = promptVM
             self.renderer = MarkdownRenderer()
             super.init()
 
@@ -228,6 +236,10 @@ struct MarkdownTextView: NSViewRepresentable {
 
         func bind(textView: MarkdownNativeTextView) {
             self.textView = textView
+            if let vm = promptPopoverVM {
+                // Attach the prompt VM to the underlying NSTextView for variable observation
+                vm.attach(to: textView)
+            }
         }
 
         func consumeFocusRequestIfNeeded(_ focusRequest: UUID?) {

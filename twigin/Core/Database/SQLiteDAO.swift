@@ -343,11 +343,227 @@ class NoteSnapshotDAO {
     }
 }
 
+// MARK: - Prompt DAO
+
+/// Errors thrown by PromptDAO
+enum PromptDAOError: Error {
+    case systemPromptDeletionNotAllowed
+}
+
+class PromptDAO {
+    private let db: Connection
+    private let table = Table("prompts")
+
+    private let id = Expression<String>("id")
+    private let title = Expression<String>("title")
+    private let category = Expression<String?>("category")
+    private let content = Expression<String>("content")
+    private let variables = Expression<String?>("variables")
+    private let targetStyle = Expression<String?>("target_style")
+    private let isSystem = Expression<Int64>("is_system")
+    private let createdAt = Expression<String>("created_at")
+    private let updatedAt = Expression<String>("updated_at")
+
+    init(db: Connection) {
+        self.db = db
+    }
+
+    // Helper formatter for SQLite DATETIME strings like "YYYY-MM-DD HH:mm:ss"
+    private static let sqliteDateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.locale = Locale(identifier: "en_US_POSIX")
+        df.timeZone = TimeZone(secondsFromGMT: 0)
+        df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return df
+    }()
+
+    private func dateFromDB(_ s: String?) -> Date {
+        guard let s = s else { return Date() }
+        if let d = PromptDAO.sqliteDateFormatter.date(from: s) { return d }
+        if let d = ISO8601DateFormatter().date(from: s) { return d }
+        return Date()
+    }
+
+    private func stringFromDate(_ d: Date) -> String {
+        return PromptDAO.sqliteDateFormatter.string(from: d)
+    }
+
+    // Encode array to JSON string for storage. Add Chinese comment about safety.
+    private func encodeArray(_ arr: [String]) throws -> String {
+        // 将数组编码为 JSON 字符串写入 SQLite TEXT 字段，保证在读取时能准确还原。
+        let data = try JSONEncoder().encode(arr)
+        return String(data: data, encoding: .utf8) ?? "[]"
+    }
+
+    private func decodeArray(_ s: String?) -> [String] {
+        guard let s = s, let data = s.data(using: .utf8) else { return [] }
+        if let arr = try? JSONDecoder().decode([String].self, from: data) { return arr }
+        return []
+    }
+
+    // MARK: - CRUD
+    // Insert a new prompt
+    func insert(_ model: PromptModel) async throws {
+        try await withCheckedThrowingContinuation { cont in
+            do {
+                let vars = try encodeArray(model.variables)
+                let styles = try encodeArray(model.targetStyle)
+                let nowStr = stringFromDate(model.updatedAt)
+                let insert = table.insert(
+                    id <- model.id,
+                    title <- model.title,
+                    category <- model.category,
+                    content <- model.content,
+                    variables <- vars,
+                    targetStyle <- styles,
+                    isSystem <- (model.isSystem ? 1 : 0),
+                    createdAt <- stringFromDate(model.createdAt),
+                    updatedAt <- nowStr
+                )
+                try db.run(insert)
+                cont.resume()
+            } catch {
+                cont.resume(throwing: error)
+            }
+        }
+    }
+
+    // Fetch all prompts
+    func getAll() async throws -> [PromptModel] {
+        return try await withCheckedThrowingContinuation { cont in
+            do {
+                var out: [PromptModel] = []
+                for row in try db.prepare(table.order(updatedAt.desc)) {
+                    let model = PromptModel(
+                        id: row[id],
+                        title: row[title],
+                        category: row[category],
+                        content: row[content],
+                        variables: decodeArray(row[variables]),
+                        targetStyle: decodeArray(row[targetStyle]),
+                        isSystem: row[isSystem] == 1,
+                        createdAt: dateFromDB(row[createdAt]),
+                        updatedAt: dateFromDB(row[updatedAt])
+                    )
+                    out.append(model)
+                }
+                cont.resume(returning: out)
+            } catch {
+                cont.resume(throwing: error)
+            }
+        }
+    }
+
+    // Fetch by category or isSystem filter
+    func query(category c: String? = nil, isSystemFlag: Bool? = nil) async throws -> [PromptModel] {
+        return try await withCheckedThrowingContinuation { cont in
+            do {
+                var query = table
+                if let c = c {
+                    query = query.filter(category == c)
+                }
+                if let flag = isSystemFlag {
+                    query = query.filter(isSystem == (flag ? 1 : 0))
+                }
+                var out: [PromptModel] = []
+                for row in try db.prepare(query.order(updatedAt.desc)) {
+                    let model = PromptModel(
+                        id: row[id],
+                        title: row[title],
+                        category: row[category],
+                        content: row[content],
+                        variables: decodeArray(row[variables]),
+                        targetStyle: decodeArray(row[targetStyle]),
+                        isSystem: row[isSystem] == 1,
+                        createdAt: dateFromDB(row[createdAt]),
+                        updatedAt: dateFromDB(row[updatedAt])
+                    )
+                    out.append(model)
+                }
+                cont.resume(returning: out)
+            } catch {
+                cont.resume(throwing: error)
+            }
+        }
+    }
+
+    // Get by id
+    func get(id idValue: String) async throws -> PromptModel? {
+        return try await withCheckedThrowingContinuation { cont in
+            do {
+                let item = table.filter(id == idValue)
+                if let row = try db.pluck(item) {
+                    let model = PromptModel(
+                        id: row[id],
+                        title: row[title],
+                        category: row[category],
+                        content: row[content],
+                        variables: decodeArray(row[variables]),
+                        targetStyle: decodeArray(row[targetStyle]),
+                        isSystem: row[isSystem] == 1,
+                        createdAt: dateFromDB(row[createdAt]),
+                        updatedAt: dateFromDB(row[updatedAt])
+                    )
+                    cont.resume(returning: model)
+                } else {
+                    cont.resume(returning: nil)
+                }
+            } catch {
+                cont.resume(throwing: error)
+            }
+        }
+    }
+
+    // Update existing prompt based on id
+    func update(_ model: PromptModel) async throws {
+        try await withCheckedThrowingContinuation { cont in
+            do {
+                let item = table.filter(id == model.id)
+                let vars = try encodeArray(model.variables)
+                let styles = try encodeArray(model.targetStyle)
+                let nowStr = stringFromDate(Date())
+                try db.run(item.update(
+                    title <- model.title,
+                    category <- model.category,
+                    content <- model.content,
+                    variables <- vars,
+                    targetStyle <- styles,
+                    updatedAt <- nowStr
+                ))
+                cont.resume()
+            } catch {
+                cont.resume(throwing: error)
+            }
+        }
+    }
+
+    // Delete by id (disallow deleting system prompts)
+    func delete(id idValue: String) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            do {
+                let item = table.filter(id == idValue)
+                if let row = try db.pluck(item) {
+                    if row[isSystem] == 1 {
+                        cont.resume(throwing: PromptDAOError.systemPromptDeletionNotAllowed)
+                        return
+                    }
+                }
+                try db.run(item.delete())
+                cont.resume()
+            } catch {
+                cont.resume(throwing: error)
+            }
+        }
+    }
+}
+
+
 class SQLiteDAO {
     let folder: FolderDAO
     let note: NoteDAO
     let opsLog: NoteOpsLogDAO
     let snapshot: NoteSnapshotDAO
+    let prompt: PromptDAO
     
     // 1. 标准依赖注入初始化，方便单元测试和解耦
     init(db: Connection) {
@@ -355,6 +571,7 @@ class SQLiteDAO {
         self.note = NoteDAO(db: db)
         self.opsLog = NoteOpsLogDAO(db: db)
         self.snapshot = NoteSnapshotDAO(db: db)
+        self.prompt = PromptDAO(db: db)
     }
     
     // 2. 提供单例便捷访问属性，默认使用 SQLiteManager 的长连接

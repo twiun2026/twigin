@@ -4,8 +4,9 @@ struct NoteEditorView: View {
     let noteId: String
     @ObservedObject var viewModel: NoteListViewModel
     let focusRequest: UUID
+    let folderTitle: String?
     @EnvironmentObject private var themeManager: ThemeManager
-    
+    @ObservedObject var promptPopoverVM: PromptPopoverViewModel
     @State private var content: String = ""
     @State private var isLoading: Bool = true
     
@@ -15,19 +16,21 @@ struct NoteEditorView: View {
                 ProgressView()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                MarkdownEditorView(
-                    text: $content,
-                    theme: themeManager.currentTheme,
-                    fontName: themeManager.selectedFontName,
-                    fontSize: CGFloat(themeManager.fontSize),
-                    lineSpacing: CGFloat(themeManager.lineSpacing),
-                    focusRequest: focusRequest
-                )
-                .padding()
-                .onChange(of: content) { _, newContent in
-                    let newTitle = extractTitle(from: newContent)
-                    viewModel.updateNoteDebounced(id: noteId, title: newTitle, content: newContent)
-                }
+                    MarkdownEditorView(
+                        text: $content,
+                        theme: themeManager.currentTheme,
+                        fontName: themeManager.selectedFontName,
+                        fontSize: CGFloat(themeManager.fontSize),
+                        lineSpacing: CGFloat(themeManager.lineSpacing),
+                        focusRequest: focusRequest,
+                        promptPopoverVM: promptPopoverVM
+                    )
+                    .padding()
+                // note: keep text observation attached while the editor exists; detach on view disappear
+                    .onChange(of: content) { _, newContent in
+                        let newTitle = extractTitle(from: newContent)
+                        viewModel.updateNoteDebounced(id: noteId, title: newTitle, content: newContent)
+                    }
             }
         }
         .background(themeManager.currentTheme.bgNoteEditor)
@@ -36,6 +39,9 @@ struct NoteEditorView: View {
         }
         .onChange(of: noteId) { _, _ in
             loadNote()
+        }
+        .onDisappear {
+            promptPopoverVM.detachTextObservation()
         }
     }
     
@@ -46,6 +52,15 @@ struct NoteEditorView: View {
                 await MainActor.run {
                     self.content = fullNote.documentJson ?? ""
                     self.isLoading = false
+                }
+                // Update metadata for popover
+                let created = Date(timeIntervalSince1970: TimeInterval(fullNote.createdAt))
+                let modified = Date(timeIntervalSince1970: TimeInterval(fullNote.updatedAt))
+                Task { await promptPopoverVM.updateMetadata(created: created, modified: modified, text: fullNote.documentJson ?? "") }
+
+                // Inform the prompt VM whether this note is inside the "Prompt List" folder
+                Task { @MainActor in
+                    promptPopoverVM.isPromptFolder = (folderTitle == "Prompt List")
                 }
             } else {
                 await MainActor.run {
