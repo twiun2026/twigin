@@ -130,6 +130,8 @@ final class SQLiteManager: @unchecked Sendable {
 
             -- 专门给搜索使用
             search_text TEXT NOT NULL DEFAULT '',
+            tags TEXT NOT NULL DEFAULT '[]',
+            is_system INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             is_deleted INTEGER NOT NULL DEFAULT 0,
@@ -155,6 +157,10 @@ final class SQLiteManager: @unchecked Sendable {
         ON notes(title COLLATE NOCASE ASC)
         WHERE is_deleted = 0;
         """)
+
+        // 迁移：为旧数据库补充 tags / is_system 列（列已存在时忽略错误）
+        try? db.execute("ALTER TABLE notes ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';")
+        try? db.execute("ALTER TABLE notes ADD COLUMN is_system INTEGER NOT NULL DEFAULT 0;")
 
         // =====================================================
         // 4. Oplog 增量同步日志

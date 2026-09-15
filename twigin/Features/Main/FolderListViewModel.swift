@@ -25,50 +25,52 @@ class FolderListViewModel: ObservableObject {
     func setupAndLoad() {
         // Initialize the database
         _ = SQLiteManager.shared.setupDatabase()
-        ensureRecentlyDeletedFolder()
+        ensureSystemFolders()
         loadFolders()
     }
     
-    private func ensureRecentlyDeletedFolder() {
+    private func ensureSystemFolders() {
         guard let dao = SQLiteDAO.shared else { return }
-        do {
-            if try dao.folder.get(id: "recently_deleted") == nil {
-                let now = Int64(Date().timeIntervalSince1970)
-                let recentlyDeleted = FolderModel(folderId: "recently_deleted", folderTitle: "Recently Deleted", createdAt: now, updatedAt: now)
-                try dao.folder.insert(recentlyDeleted)
+        let now = Int64(Date().timeIntervalSince1970)
+        let system: [(id: String, title: String)] = [
+            ("__prompts__", "Prompt List"),
+            ("__source_library__", "Source Library"),
+            ("recently_deleted", "Recently Deleted")
+        ]
+        for sf in system {
+            do {
+                if try dao.folder.get(id: sf.id) == nil {
+                    try dao.folder.insert(FolderModel(folderId: sf.id, folderTitle: sf.title, createdAt: now, updatedAt: now))
+                }
+            } catch {
+                print("Failed to ensure system folder \(sf.id): \(error)")
             }
-        } catch {
-            print("Failed to ensure Recently Deleted folder: \(error)")
         }
     }
     
     func loadFolders() {
-        guard let dao = SQLiteDAO.shared else { 
+        guard let dao = SQLiteDAO.shared else {
             print("SQLiteDAO is nil, database might not be initialized")
-            return 
+            return
         }
         do {
-            var fetchedFolders = try dao.folder.getAll()
-            
-            // Separate "Recently Deleted" so it always appears at the bottom
-            let recentlyDeleted = fetchedFolders.first(where: { $0.folderId == "recently_deleted" })
-            fetchedFolders.removeAll(where: { $0.folderId == "recently_deleted" })
-            
-            // Sort remaining folders based on sortOption (Note: FolderModel currently lacks date fields, 
-            // so we implement basic sorting on title or fallback to no-op for dates as a placeholder)
+            let fetchedFolders = try dao.folder.getAll()
+
+            let systemTopIds = ["__prompts__", "__source_library__"]
+            let topFolders = systemTopIds.compactMap { id in fetchedFolders.first(where: { $0.folderId == id }) }
+            let bottomFolder = fetchedFolders.first(where: { $0.folderId == "recently_deleted" })
+            var userFolders = fetchedFolders.filter {
+                !systemTopIds.contains($0.folderId) && $0.folderId != "recently_deleted"
+            }
+
             switch sortOption {
             case .title:
-                fetchedFolders.sort { $0.folderTitle.localizedStandardCompare($1.folderTitle) == .orderedAscending }
+                userFolders.sort { $0.folderTitle.localizedStandardCompare($1.folderTitle) == .orderedAscending }
             case .dateEdited, .dateCreated, .newestFirst, .oldestFirst:
-                // Placeholder for future implementation when Date fields are added to FolderModel
                 break
             }
-            
-            if let recentlyDeleted = recentlyDeleted {
-                fetchedFolders.append(recentlyDeleted)
-            }
-            
-            self.folders = fetchedFolders
+
+            self.folders = topFolders + userFolders + (bottomFolder.map { [$0] } ?? [])
             print("Loaded \(self.folders.count) folders from DB.")
         } catch {
             print("Failed to fetch folders: \(error)")
@@ -118,8 +120,8 @@ class FolderListViewModel: ObservableObject {
     }
     
     func deleteFolder(id: String) {
-        // Prevent deleting the recently deleted folder
-        guard id != "recently_deleted" else { return }
+        let protectedIds = ["recently_deleted", "__prompts__", "__source_library__"]
+        guard !protectedIds.contains(id) else { return }
         guard let dao = SQLiteDAO.shared else { return }
         
         do {
@@ -132,7 +134,9 @@ class FolderListViewModel: ObservableObject {
                     title: note.title,
                     documentJson: note.documentJson,
                     createdAt: note.createdAt,
-                    updatedAt: note.updatedAt
+                    updatedAt: note.updatedAt,
+                    tags: note.tags,
+                    isSystem: note.isSystem
                 )
                 try dao.note.update(updatedNote)
             }

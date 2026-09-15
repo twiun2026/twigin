@@ -444,7 +444,8 @@ struct MainSplitView: View {
                     .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
                     .listRowBackground(Color.clear)
                     .contextMenu {
-                        if folder.folderId != "recently_deleted" {
+                        let isSystemFolder = ["recently_deleted", "__prompts__", "__source_library__"].contains(folder.folderId)
+                        if !isSystemFolder {
                             Button("Rename Folder") {
                                 folderViewModel.editingFolderId = folder.id
                             }
@@ -575,7 +576,7 @@ struct MainSplitView: View {
                         noteId: selectedNoteId,
                         viewModel: noteViewModel,
                         focusRequest: editorFocusRequest,
-                        folderTitle: currentFolderTitle,
+                        folderId: selectedFolderId,
                         promptPopoverVM: promptPopoverVM
                     )
                 } else {

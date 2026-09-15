@@ -4,7 +4,7 @@ struct NoteEditorView: View {
     let noteId: String
     @ObservedObject var viewModel: NoteListViewModel
     let focusRequest: UUID
-    let folderTitle: String?
+    let folderId: String?
     @EnvironmentObject private var themeManager: ThemeManager
     @ObservedObject var promptPopoverVM: PromptPopoverViewModel
     @State private var content: String = ""
@@ -60,7 +60,7 @@ struct NoteEditorView: View {
 
                 // Inform the prompt VM whether this note is inside the "Prompt List" folder
                 Task { @MainActor in
-                    promptPopoverVM.isPromptFolder = (folderTitle == "Prompt List")
+                    promptPopoverVM.isPromptFolder = (folderId == "__prompts__")
                 }
             } else {
                 await MainActor.run {

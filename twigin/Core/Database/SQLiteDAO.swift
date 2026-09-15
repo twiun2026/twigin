@@ -40,7 +40,9 @@ struct NoteModel: Identifiable, Hashable {
     let documentJson: String?
     let createdAt: Int64
     let updatedAt: Int64
-    
+    var tags: [String] = []
+    var isSystem: Bool = false
+
     var id: String { noteId }
 }
 
@@ -60,6 +62,36 @@ struct NoteSnapshotModel {
     let baseVersion: Int64
     let documentJson: String
     let createdAt: Int64
+}
+
+extension NoteModel {
+    init(from prompt: PromptModel) {
+        self.init(
+            noteId: prompt.id,
+            folderId: "__prompts__",
+            title: prompt.title,
+            documentJson: prompt.content,
+            createdAt: Int64(prompt.createdAt.timeIntervalSince1970),
+            updatedAt: Int64(prompt.updatedAt.timeIntervalSince1970),
+            isSystem: prompt.isSystem
+        )
+    }
+}
+
+// MARK: - Folder Types
+
+enum FolderType {
+    case prompts
+    case sourceLibrary
+    case regular
+
+    init(_ folderId: String?) {
+        switch folderId {
+        case "__prompts__":        self = .prompts
+        case "__source_library__": self = .sourceLibrary
+        default:                   self = .regular
+        }
+    }
 }
 
 // MARK: - DAOs
@@ -161,11 +193,24 @@ class NoteDAO {
     private let folderId = Expression<String?>("folder_id")
     private let title = Expression<String>("title")
     private let documentJson = Expression<String>("document_json")
+    private let tags = Expression<String>("tags")
+    private let isSystem = Expression<Int64>("is_system")
     private let createdAt = Expression<Int64>("created_at")
     private let updatedAt = Expression<Int64>("updated_at")
-    
+
     init(db: Connection) {
         self.db = db
+    }
+
+    private func encodeTags(_ arr: [String]) -> String {
+        let data = (try? JSONEncoder().encode(arr)) ?? Data()
+        return String(data: data, encoding: .utf8) ?? "[]"
+    }
+
+    private func decodeTags(_ s: String) -> [String] {
+        guard let data = s.data(using: .utf8),
+              let arr = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return arr
     }
     
     func insert(_ model: NoteModel) throws {
@@ -174,18 +219,22 @@ class NoteDAO {
             folderId <- model.folderId,
             title <- model.title,
             documentJson <- model.documentJson ?? "",
+            tags <- encodeTags(model.tags),
+            isSystem <- (model.isSystem ? 1 : 0),
             createdAt <- model.createdAt,
             updatedAt <- model.updatedAt
         )
         try db.run(insert)
     }
-    
+
     func update(_ model: NoteModel) throws {
         let item = table.filter(noteId == model.noteId)
         try db.run(item.update(
             folderId <- model.folderId,
             title <- model.title,
             documentJson <- model.documentJson ?? "",
+            tags <- encodeTags(model.tags),
+            isSystem <- (model.isSystem ? 1 : 0),
             updatedAt <- model.updatedAt
         ))
     }
@@ -204,7 +253,9 @@ class NoteDAO {
                 title: row[title],
                 documentJson: row[documentJson],
                 createdAt: row[createdAt],
-                updatedAt: row[updatedAt]
+                updatedAt: row[updatedAt],
+                tags: decodeTags(row[tags]),
+                isSystem: row[isSystem] == 1
             )
         }
         return nil
@@ -220,7 +271,9 @@ class NoteDAO {
                 title: row[title],
                 documentJson: row[documentJson],
                 createdAt: row[createdAt],
-                updatedAt: row[updatedAt]
+                updatedAt: row[updatedAt],
+                tags: decodeTags(row[tags]),
+                isSystem: row[isSystem] == 1
             ))
         }
         return results
@@ -228,7 +281,7 @@ class NoteDAO {
     
     func getSummaryByFolder(id: String) throws -> [NoteModel] {
         var results = [NoteModel]()
-        let query = table.select(noteId, folderId, title, createdAt, updatedAt)
+        let query = table.select(noteId, folderId, title, tags, isSystem, createdAt, updatedAt)
             .filter(folderId == id)
             .order(updatedAt.desc)
         for row in try db.prepare(query) {
@@ -238,7 +291,9 @@ class NoteDAO {
                 title: row[title],
                 documentJson: nil,
                 createdAt: row[createdAt],
-                updatedAt: row[updatedAt]
+                updatedAt: row[updatedAt],
+                tags: decodeTags(row[tags]),
+                isSystem: row[isSystem] == 1
             ))
         }
         return results
