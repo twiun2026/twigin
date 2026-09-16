@@ -104,9 +104,8 @@ struct MainSplitViewLeftPart: View {
                                 for note in droppedNotes where !note.isPrompt {
                                     do {
                                         if let dbNote = try dao.note.get(id: note.id) {
-                                            let title = dbNote.title
                                             let doc = dbNote.documentJson ?? ""
-                                            assembledArticles += "\(title)\n\(doc)\n\n"
+                                            assembledArticles += "\n\(doc)\n\n"
                                         }
                                     } catch {
                                         // ignore individual read errors but continue
@@ -121,9 +120,7 @@ struct MainSplitViewLeftPart: View {
                                         // 3) Replace {{articles}} placeholder
                                         let result = promptContent.replacingOccurrences(of: "{{articles}}", with: assembledArticles)
                                         // Print final assembled prompt + articles
-                                        print("----- Assembled Prompt Start -----")
                                         print(result)
-                                        print("----- Assembled Prompt End -----")
                                     } else {
                                         print("Prompt with id \(promptNote.id) not found in prompts table")
                                     }
