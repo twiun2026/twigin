@@ -148,21 +148,51 @@ struct FolderRowView: View {
     @EnvironmentObject private var themeManager: ThemeManager
 
     var body: some View {
-        if isEditing {
-            TextField("Folder Name", text: $editedTitle)
-                .focused($isFocused)
-                .foregroundColor(themeManager.currentTheme.textMain)
-                .onSubmit { onCommitRename(editedTitle) }
-                .onChange(of: isFocused) { _, focused in
-                    if !focused { onCommitRename(editedTitle) }
-                }
-                .onAppear {
-                    editedTitle = folder.folderTitle
-                    isFocused = true
-                }
-        } else {
-            Text(folder.folderTitle)
-                .foregroundColor(themeManager.currentTheme.textMain)
+        HStack(spacing: 8) {
+            Image(systemName: iconName(for: folder))
+                .font(.system(size: 16))
+                .frame(width: 20, height: 20, alignment: .center)
+                .foregroundColor(iconColor(for: folder))
+            if isEditing {
+                TextField("Folder Name", text: $editedTitle)
+                    .focused($isFocused)
+                    .foregroundColor(themeManager.currentTheme.textMain)
+                    .onSubmit { onCommitRename(editedTitle) }
+                    .onChange(of: isFocused) { _, focused in
+                        if !focused { onCommitRename(editedTitle) }
+                    }
+                    .onAppear {
+                        editedTitle = folder.folderTitle
+                        isFocused = true
+                    }
+            } else {
+                Text(folder.folderTitle)
+                    .foregroundColor(themeManager.currentTheme.textMain)
+            }
+        }
+    }
+
+    private func iconName(for folder: FolderModel) -> String {
+        switch folder.folderId {
+        case "__prompts__":
+            return "books.vertical"
+        case "__source_library__":
+            return "books.vertical"
+        case "recently_deleted":
+            return "trash"
+        default:
+            return "pawprint"
+        }
+    }
+
+    private func iconColor(for folder: FolderModel) -> Color {
+        switch folder.folderId {
+        case "__prompts__", "__source_library__":
+            return themeManager.currentTheme.textMain
+        case "recently_deleted":
+            return .red
+        default:
+            return themeManager.currentTheme.textMain
         }
     }
 }
@@ -179,13 +209,19 @@ struct FolderListItemView: View {
     var body: some View {
         let isEditing = (folderViewModel.editingFolderId == folder.id)
 
-        FolderRowView(
-            folder: folder,
-            isEditing: isEditing,
-            onCommitRename: { newTitle in
-                folderViewModel.renameFolder(id: folder.id, newTitle: newTitle)
+        VStack(spacing: 0) {
+            FolderRowView(
+                folder: folder,
+                isEditing: isEditing,
+                onCommitRename: { newTitle in
+                    folderViewModel.renameFolder(id: folder.id, newTitle: newTitle)
+                }
+            )
+            // Add a divider after Source Library to visually separate system libraries
+            if folder.folderId == "__source_library__" {
+                    
             }
-        )
+        }
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
