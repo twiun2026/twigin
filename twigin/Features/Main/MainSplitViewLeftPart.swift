@@ -72,9 +72,65 @@ struct MainSplitViewLeftPart: View {
                         }
                         .buttonStyle(.plain)
                         .help("Clear All")
-                        
+
                         Button {
-                            
+                            Task {
+                                // Ensure we have DAO
+                                guard let dao = SQLiteDAO.shared else {
+                                    await MainActor.run {
+                                        let alert = NSAlert()
+                                        alert.messageText = "Database unavailable"
+                                        alert.informativeText = "Cannot access local database."
+                                        alert.alertStyle = .warning
+                                        alert.runModal()
+                                    }
+                                    return
+                                }
+
+                                // Verify presence of at least one prompt among dropped notes
+                                guard let promptNote = droppedNotes.first(where: { $0.isPrompt }) else {
+                                    await MainActor.run {
+                                        let alert = NSAlert()
+                                        alert.messageText = "Lack a prompt!"
+                                        alert.informativeText = "Please drop at least one prompt from Prompt Library."
+                                        alert.alertStyle = .warning
+                                        alert.runModal()
+                                    }
+                                    return
+                                }
+
+                                // 1) Read non-prompt notes from DB (title, document_json)
+                                var assembledArticles = ""
+                                for note in droppedNotes where !note.isPrompt {
+                                    do {
+                                        if let dbNote = try dao.note.get(id: note.id) {
+                                            let title = dbNote.title
+                                            let doc = dbNote.documentJson ?? ""
+                                            assembledArticles += "\(title)\n\(doc)\n\n"
+                                        }
+                                    } catch {
+                                        // ignore individual read errors but continue
+                                        print("Failed to read note \(note.id) from DB: \(error)")
+                                    }
+                                }
+
+                                // 2) Read prompt note content from prompts table
+                                do {
+                                    if let promptModel = try await dao.prompt.get(id: promptNote.id) {
+                                        let promptContent = promptModel.content
+                                        // 3) Replace {{articles}} placeholder
+                                        let result = promptContent.replacingOccurrences(of: "{{articles}}", with: assembledArticles)
+                                        // Print final assembled prompt + articles
+                                        print("----- Assembled Prompt Start -----")
+                                        print(result)
+                                        print("----- Assembled Prompt End -----")
+                                    } else {
+                                        print("Prompt with id \(promptNote.id) not found in prompts table")
+                                    }
+                                } catch {
+                                    print("Failed to read prompt from DB: \(error)")
+                                }
+                            }
                         } label: {
                             Image(systemName: "play.circle.fill")
                                 .font(.system(size:16))
@@ -329,5 +385,14 @@ struct DroppedNoteRowView: View {
         }
         .padding(.vertical, 4)
         .listRowBackground(Color.clear)
+    }
+}
+
+// Local helper extension: view-layer computed property to detect if a NoteModel comes from the Prompt Library.
+// This is intentionally local to the UI layer so we don't modify the shared `NoteModel`/DAO definitions.
+private extension NoteModel {
+    var isPrompt: Bool {
+        // Adjust the field name if your NoteModel uses a different property to store folder id.
+        return (self.folderId ?? "") == "__prompts__"
     }
 }
