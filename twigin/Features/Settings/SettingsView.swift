@@ -390,6 +390,9 @@ struct AISettingsView: View {
     @State private var isTestingGemini: Bool = false
     @State private var showGeminiTestResultAlert: Bool = false
     @State private var geminiTestResultMessage: String = ""
+    // Enable switches
+    @State private var qwenEnabled: Bool = true
+    @State private var geminiEnabled: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -437,6 +440,28 @@ struct AISettingsView: View {
                 .buttonStyle(.borderedProminent)
             }
 
+            // Qwen enable toggle
+            HStack {
+                Toggle(isOn: $qwenEnabled) {
+                    Text("Enable")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                }
+                .onChange(of: qwenEnabled) { _, new in
+                    if new {
+                        // enabling qwen -> disable gemini
+                        geminiEnabled = false
+                        themeManager.setAIProvider("qwen")
+                    } else {
+                        // prevent disabling both: if gemini not enabled, keep qwen enabled
+                        if !geminiEnabled {
+                            DispatchQueue.main.async { qwenEnabled = true }
+                        }
+                    }
+                }
+                Spacer()
+            }
+
             // Gemini API Key section
             Text("Gemini API Key")
                 .font(.system(size: 13))
@@ -482,6 +507,26 @@ struct AISettingsView: View {
                 .buttonStyle(.borderedProminent)
             }
 
+            // Gemini enable toggle
+            HStack {
+                Toggle(isOn: $geminiEnabled) {
+                    Text("Enable")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                }
+                .onChange(of: geminiEnabled) { _, new in
+                    if new {
+                        qwenEnabled = false
+                        themeManager.setAIProvider("gemini")
+                    } else {
+                        if !qwenEnabled {
+                            DispatchQueue.main.async { geminiEnabled = true }
+                        }
+                    }
+                }
+                Spacer()
+            }
+
             Spacer()
         }
         .padding(20)
@@ -495,6 +540,9 @@ struct AISettingsView: View {
                     if let gkey = try await KeychainManager.shared.getApiKey(account: "GeminiAPIKey") {
                         geminiApiKey = gkey
                     }
+                    // Load enabled provider state from ThemeManager
+                    qwenEnabled = (themeManager.selectedAIProvider == "qwen")
+                    geminiEnabled = (themeManager.selectedAIProvider == "gemini")
                 } catch {
                     errorMessage = error.localizedDescription
                     showErrorAlert = true

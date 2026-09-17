@@ -8,6 +8,7 @@ class ThemeManager: ObservableObject {
     @AppStorage("storedFontSize") private var storedFontSize: Double = 14
     @AppStorage("localStoragePath") private var storedLocalStoragePath: String = ""
     @AppStorage("backupToCloud") private var storedBackupToCloud: Bool = false
+    @AppStorage("selectedAIProvider") private var storedSelectedAIProvider: String = "qwen"
 
     @Published var currentTheme: AppTheme = ThemePresets.simplistic
     @Published var selectedFontName: String = "Avenir Next"
@@ -15,6 +16,7 @@ class ThemeManager: ObservableObject {
     @Published var fontSize: Double = 14
     @Published var localStoragePath: String = ""
     @Published var backupToCloud: Bool = false
+    @Published var selectedAIProvider: String = "qwen"
 
     init() {
         if let savedTheme = ThemePresets.allThemes.first(where: { $0.name == selectedThemeName }) {
@@ -26,6 +28,7 @@ class ThemeManager: ObservableObject {
         // Load persisted data settings
         self.localStoragePath = storedLocalStoragePath
         self.backupToCloud = storedBackupToCloud
+        self.selectedAIProvider = storedSelectedAIProvider
     }
 
     func setTheme(_ theme: AppTheme) {
@@ -46,6 +49,11 @@ class ThemeManager: ObservableObject {
     func setBackupToCloud(_ enabled: Bool) {
         backupToCloud = enabled
         storedBackupToCloud = enabled
+    }
+
+    func setAIProvider(_ provider: String) {
+        selectedAIProvider = provider
+        storedSelectedAIProvider = provider
     }
 
     func setLineSpacing(_ value: Double) {
