@@ -23,12 +23,13 @@ final class KeychainManager {
     private init() {}
 
     private let service: String = Bundle.main.bundleIdentifier ?? "twigin"
-    private let account: String = "QWenAPIKey"
+    private let defaultAccount: String = "QWenAPIKey"
 
-    /// Save API key to Keychain. Pass an empty string to delete the key.
-    func save(apiKey: String) async throws {
+    /// Generic save that accepts an account identifier so multiple API keys
+    /// (e.g. Qwen, Gemini) can be stored independently in the Keychain.
+    func save(apiKey: String, account: String) async throws {
         if apiKey.isEmpty {
-            try deleteApiKey()
+            try deleteApiKey(account: account)
             return
         }
 
@@ -59,8 +60,19 @@ final class KeychainManager {
         throw KeychainError.unexpectedStatus(status)
     }
 
+    /// Save API key to Keychain using the default Qwen account. Pass an empty string to delete the key.
+    func save(apiKey: String) async throws {
+        try await save(apiKey: apiKey, account: defaultAccount)
+    }
+
     /// Retrieve the stored API key, or throw if not found.
+    /// Retrieve the stored API key for the default Qwen account, or nil if not found.
     func getApiKey() async throws -> String? {
+        return try await getApiKey(account: defaultAccount)
+    }
+
+    /// Retrieve the stored API key for a specific account identifier.
+    func getApiKey(account: String) async throws -> String? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
@@ -82,6 +94,10 @@ final class KeychainManager {
 
     /// Delete stored API key. Throws on failure (except item not found).
     func deleteApiKey() throws {
+        try deleteApiKey(account: defaultAccount)
+    }
+
+    func deleteApiKey(account: String) throws {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,

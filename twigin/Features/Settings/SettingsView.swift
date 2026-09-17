@@ -384,6 +384,12 @@ struct AISettingsView: View {
     @State private var isTesting: Bool = false
     @State private var showTestResultAlert: Bool = false
     @State private var testResultMessage: String = ""
+    // Gemini key states
+    @State private var geminiApiKey: String = ""
+    @State private var geminiShowKey: Bool = false
+    @State private var isTestingGemini: Bool = false
+    @State private var showGeminiTestResultAlert: Bool = false
+    @State private var geminiTestResultMessage: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -431,6 +437,51 @@ struct AISettingsView: View {
                 .buttonStyle(.borderedProminent)
             }
 
+            // Gemini API Key section
+            Text("Gemini API Key")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 8) {
+                if geminiShowKey {
+                    TextField("Enter Gemini API Key", text: $geminiApiKey)
+                        .textFieldStyle(.plain)
+                        .frame(height: 28)
+                } else {
+                    SecureField("Enter Gemini API Key", text: $geminiApiKey)
+                        .textFieldStyle(.plain)
+                        .frame(height: 28)
+                }
+
+                Button(action: { geminiShowKey.toggle() }) {
+                    Image(systemName: geminiShowKey ? "eye.slash" : "eye")
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 8)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button(action: { Task { await testGeminiKey() } }) {
+                    if isTestingGemini {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .frame(width: 20, height: 20)
+                    } else {
+                        Text("Test Key")
+                    }
+                }
+                .buttonStyle(.bordered)
+
+                Button(action: { Task { await saveGeminiKey() } }) {
+                    Text("Save")
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+            }
+
             Spacer()
         }
         .padding(20)
@@ -439,6 +490,10 @@ struct AISettingsView: View {
                 do {
                     if let saved = try await KeychainManager.shared.getApiKey() {
                         apiKey = saved
+                    }
+                    // Load Gemini key if stored under separate account
+                    if let gkey = try await KeychainManager.shared.getApiKey(account: "GeminiAPIKey") {
+                        geminiApiKey = gkey
                     }
                 } catch {
                     errorMessage = error.localizedDescription
@@ -461,11 +516,28 @@ struct AISettingsView: View {
         } message: {
             Text(testResultMessage)
         }
+        .alert("Gemini Test Result", isPresented: $showGeminiTestResultAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(geminiTestResultMessage)
+        }
     }
 
     private func saveKey() async {
         do {
             try await KeychainManager.shared.save(apiKey: apiKey)
+            await MainActor.run { showSavedAlert = true }
+        } catch {
+            await MainActor.run {
+                errorMessage = error.localizedDescription
+                showErrorAlert = true
+            }
+        }
+    }
+
+    private func saveGeminiKey() async {
+        do {
+            try await KeychainManager.shared.save(apiKey: geminiApiKey, account: "GeminiAPIKey")
             await MainActor.run { showSavedAlert = true }
         } catch {
             await MainActor.run {
@@ -525,6 +597,71 @@ struct AISettingsView: View {
             await MainActor.run {
                 testResultMessage = "Network error: \(error.localizedDescription)"
                 showTestResultAlert = true
+            }
+        }
+    }
+
+    private func testGeminiKey() async {
+        isTestingGemini = true
+        defer { Task { @MainActor in isTestingGemini = false } }
+
+        guard !geminiApiKey.isEmpty else {
+            await MainActor.run {
+                geminiTestResultMessage = "API Key is empty. Please enter a key before testing."
+                showGeminiTestResultAlert = true
+            }
+            return
+        }
+
+        // Google Gemini (Generative Language) expects either an OAuth2 access token
+        // (Bearer) or an API key supplied as a `key` query parameter. Using a raw
+        // API key in the Authorization: Bearer header will result in 401 as you've
+        // observed. Here we validate the key by calling the Models list endpoint
+        // with the `key` query parameter which is accepted for API keys.
+        guard var comps = URLComponents(string: "https://generativelanguage.googleapis.com/v1beta/models") else {
+            await MainActor.run {
+                geminiTestResultMessage = "Invalid validation endpoint URL."
+                showGeminiTestResultAlert = true
+            }
+            return
+        }
+        comps.queryItems = [URLQueryItem(name: "key", value: geminiApiKey)]
+        guard let endpoint = comps.url else {
+            await MainActor.run {
+                geminiTestResultMessage = "Failed to form request URL."
+                showGeminiTestResultAlert = true
+            }
+            return
+        }
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse {
+                if (200..<300).contains(http.statusCode) {
+                    await MainActor.run {
+                        geminiTestResultMessage = "Key appears valid (HTTP \(http.statusCode))."
+                        showGeminiTestResultAlert = true
+                    }
+                } else {
+                    let serverMsg = String(data: data, encoding: .utf8) ?? "(no body)"
+                    await MainActor.run {
+                        geminiTestResultMessage = "Server returned HTTP \(http.statusCode): \(serverMsg)"
+                        showGeminiTestResultAlert = true
+                    }
+                }
+            } else {
+                await MainActor.run {
+                    geminiTestResultMessage = "Non-HTTP response received."
+                    showGeminiTestResultAlert = true
+                }
+            }
+        } catch {
+            await MainActor.run {
+                geminiTestResultMessage = "Network error: \(error.localizedDescription)"
+                showGeminiTestResultAlert = true
             }
         }
     }
