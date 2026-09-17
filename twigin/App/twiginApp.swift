@@ -11,18 +11,21 @@ import SwiftUI
 struct twiginApp: App {
     @StateObject private var themeManager = ThemeManager()
     
-    // 在最外层（App 根节点）组装具体的 Provider 和路由策略
+    // 启动时从持久化存储读取用户选择的 Provider，避免出现初始状态不一致
     private let aiService: AIService = {
-        let local = AppleFoundationProvider()
-        let cloud = QWenProvider()
-        let routing = RoutingAIProvider(localProvider: local, cloudProvider: cloud, tokenThreshold: 2000)
-        return AIService(provider: routing)
+        let stored = UserDefaults.standard.string(forKey: "selectedAIProvider") ?? AIProviderType.apple.rawValue
+        return AIService(provider: AIProviderFactory.makeProvider(for: stored))
     }()
 
     var body: some Scene {
         WindowGroup {
             MainSplitView(aiService: aiService)
                 .environmentObject(themeManager)
+                .onChange(of: themeManager.selectedAIProvider) { _, newValue in
+                    Task {
+                        await aiService.updateProvider(AIProviderFactory.makeProvider(for: newValue))
+                    }
+                }
         }
         
         Settings {

@@ -1,5 +1,23 @@
 import Foundation
 
+// MARK: - AIProviderType
+
+public enum AIProviderType: String, Sendable, CaseIterable, Identifiable {
+    case apple  = "apple"
+    case qwen   = "qwen"
+    case gemini = "gemini"
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .apple:  "Apple Intelligence"
+        case .qwen:   "通义千问 (QWen)"
+        case .gemini: "Google Gemini"
+        }
+    }
+}
+
 // MARK: - AICommand
 
 /// A command type that specifies the intent of an AI request.

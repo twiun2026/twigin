@@ -10,9 +10,9 @@ public final class GeminiProvider: AIProvider {
         public let timeoutInterval: TimeInterval
 
         public init(
-            endpoint: URL = URL(string: "generativelanguage.googleapis.com/v1beta/models")!,
+            endpoint: URL = URL(string: "https://generativelanguage.googleapis.com/v1beta")!,
             apiKey: String = "",
-            model: String = "gemini-2.5-flash-lite", // 支持您指定的 Flash-Lite 模型
+            model: String = "gemini-3.5-flash-lite", // 支持您指定的 Flash-Lite 模型
             timeoutInterval: TimeInterval = 120
         ) {
             self.endpoint = endpoint
@@ -43,7 +43,7 @@ public final class GeminiProvider: AIProvider {
             let task = Task {
                 do {
                     // 1. 从 Keychain 中获取 apiKey（带有 fallback 兜底）
-                    let apiKey = await AIKeyRetriever.retrieve(fallback: config.apiKey)
+                    let apiKey = await AIKeyRetriever.retrieve(account: "GeminiAPIKey", fallback: config.apiKey)
                     guard !apiKey.isEmpty else {
                         throw AIProviderError.unavailable("Gemini API Key 缺失。请在设置中保存您的 API Key。")
                     }
@@ -51,7 +51,7 @@ public final class GeminiProvider: AIProvider {
                     print("[GeminiProvider] 正在发起对话请求 -> 模型: \(config.model)")
 
                     // 2. 拼接 Gemini SSE 专属端点
-                    let urlString = "\(config.endpoint.absoluteString)/models/\(config.model):streamGenerateContent?alt=sse"
+                    let urlString = "\(config.endpoint.absoluteString)/models/\(config.model):streamGenerateContent?alt=sse&key=\(apiKey)"
                     guard let url = URL(string: urlString) else {
                         throw AIProviderError.invalidRequest("非法的 Gemini API 地址。")
                     }
@@ -59,7 +59,7 @@ public final class GeminiProvider: AIProvider {
                     var urlRequest = URLRequest(url: url, timeoutInterval: config.timeoutInterval)
                     urlRequest.httpMethod = "POST"
                     urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    urlRequest.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
+//                    urlRequest.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
 
                     // 3. 组装 Gemini 的内容结构（支持 systemInstruction 和 contents）
                     var body: [String: Any] = [:]

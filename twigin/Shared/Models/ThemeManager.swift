@@ -51,6 +51,11 @@ class ThemeManager: ObservableObject {
         storedBackupToCloud = enabled
     }
 
+    var currentProviderType: AIProviderType {
+        get { AIProviderType(rawValue: selectedAIProvider) ?? .apple }
+        set { setAIProvider(newValue.rawValue) }
+    }
+
     func setAIProvider(_ provider: String) {
         selectedAIProvider = provider
         storedSelectedAIProvider = provider
