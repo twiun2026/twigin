@@ -13,6 +13,8 @@ struct MainSplitViewLeftPart: View {
     var isNewFolderFocused: FocusState<Bool>.Binding
     @EnvironmentObject private var themeManager: ThemeManager
 
+    let aiService: AIService
+    
     var body: some View {
         VStack(spacing: 0) {
             List {
@@ -75,57 +77,44 @@ struct MainSplitViewLeftPart: View {
 
                         Button {
                             Task {
-                                // Ensure we have DAO
-                                guard let dao = SQLiteDAO.shared else {
-                                    await MainActor.run {
-                                        let alert = NSAlert()
-                                        alert.messageText = "Database unavailable"
-                                        alert.informativeText = "Cannot access local database."
-                                        alert.alertStyle = .warning
-                                        alert.runModal()
-                                    }
-                                    return
-                                }
+                                guard let dao = SQLiteDAO.shared else { return }
+                                guard let promptNote = droppedNotes.first(where: { $0.isPrompt }) else { return }
 
-                                // Verify presence of at least one prompt among dropped notes
-                                guard let promptNote = droppedNotes.first(where: { $0.isPrompt }) else {
-                                    await MainActor.run {
-                                        let alert = NSAlert()
-                                        alert.messageText = "Lack a prompt!"
-                                        alert.informativeText = "Please drop at least one prompt from Prompt Library."
-                                        alert.alertStyle = .warning
-                                        alert.runModal()
-                                    }
-                                    return
-                                }
-
-                                // 1) Read non-prompt notes from DB (title, document_json)
                                 var assembledArticles = ""
                                 for note in droppedNotes where !note.isPrompt {
                                     do {
                                         if let dbNote = try dao.note.get(id: note.id) {
-                                            let doc = dbNote.documentJson ?? ""
-                                            assembledArticles += "\n\(doc)\n\n"
+                                            assembledArticles += "\n\(dbNote.documentJson ?? "")\n\n"
                                         }
                                     } catch {
-                                        // ignore individual read errors but continue
-                                        print("Failed to read note \(note.id) from DB: \(error)")
+                                        print("Failed to read note: \(error)")
                                     }
                                 }
 
-                                // 2) Read prompt note content from prompts table
                                 do {
                                     if let promptModel = try await dao.prompt.get(id: promptNote.id) {
-                                        let promptContent = promptModel.content
-                                        // 3) Replace {{articles}} placeholder
-                                        let result = promptContent.replacingOccurrences(of: "{{articles}}", with: assembledArticles)
-                                        // Print final assembled prompt + articles
-                                        print(result)
-                                    } else {
-                                        print("Prompt with id \(promptNote.id) not found in prompts table")
+                                        let result = promptModel.content.replacingOccurrences(of: "{{articles}}", with: assembledArticles)
+                                        
+                                        // ==========================================
+                                        // 优雅调用：直接丢给已注入的 aiService，完全不耦合具体 Provider
+                                        // ==========================================
+                                        let aiRequest = AIRequest(command: .ask, prompt: result)
+                                        let eventStream = await aiService.execute(request: aiRequest)
+                                        for try await event in eventStream {
+                                            switch event {
+                                            case .chunk(let textChunk):
+                                                print(textChunk, terminator: "")
+                                            case .completed:
+                                                print("\n--- Completed ---")
+                                            case .failed(let error):
+                                                print("\nError: \(error.localizedDescription)")
+                                            default:
+                                                break
+                                            }
+                                        }
                                     }
                                 } catch {
-                                    print("Failed to read prompt from DB: \(error)")
+                                    print("DB Error: \(error)")
                                 }
                             }
                         } label: {

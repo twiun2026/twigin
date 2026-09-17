@@ -7,6 +7,10 @@ import Foundation
 /// Extend this enum to support additional commands (e.g. `.translate`, `.summarize`).
 public enum AICommand: Sendable, Hashable {
     case ask
+    case translate
+    case summarize
+    case keyPoints
+    case concise
     // Future: case translate, case summarize, case explain, case fixGrammar
 }
 

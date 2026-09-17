@@ -93,7 +93,7 @@ print("prompt: \(prompt)")
         }
 
         switch request.command {
-        case .ask:
+        case .ask, .translate, .summarize, .keyPoints, .concise:
             parts.append(request.prompt)
         }
 

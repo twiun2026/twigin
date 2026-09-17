@@ -12,7 +12,7 @@ struct MainSplitView: View {
     @StateObject private var folderViewModel = FolderListViewModel()
     @StateObject private var noteViewModel = NoteListViewModel()
     @StateObject private var promptPopoverVM = PromptPopoverViewModel()
-
+    
     @State private var selectedFolderId: FolderModel.ID?
     @State private var selectedNoteId: NoteModel.ID?
     @State private var editorFocusRequest = UUID()
@@ -26,6 +26,8 @@ struct MainSplitView: View {
     @FocusState private var isNewFolderFocused: Bool
     @FocusState private var focusedColumn: ActiveFocusColumn?
 
+    let aiService: AIService
+    
     private func createAndFocusNewNote(in folderId: FolderModel.ID) {
         guard let newNoteId = noteViewModel.createNote(in: folderId) else { return }
         selectedNoteId = newNoteId
@@ -65,168 +67,135 @@ struct MainSplitView: View {
     }
 
     private func embedNote(noteId: NoteModel.ID) {
-        Task {
-            do {
-                guard let fullNote = await noteViewModel.fetchFullNoteContent(id: noteId) else {
-                    let alert = NSAlert()
-                    alert.messageText = "Note not found"
-                    alert.informativeText = "Cannot find the selected note in the database."
-                    alert.alertStyle = .warning
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
-                    return
-                }
-
-                let raw = fullNote.documentJson ?? ""
-                let parsed = ArticleMetadataParser().parse(raw)
-                let title = parsed.title
-                let publishDate = parsed.publishDate
-                let urlString = parsed.url
-                let tags: [String] = parsed.tags
-                let content = parsed.content
-
-                func chunk(_ text: String, maxLen: Int = 300, overlap: Int = 50) -> [String] {
-                    guard !text.isEmpty else { return [] }
-                    let chars = Array(text)
-                    var result: [String] = []
-                    var start = 0
-                    let n = chars.count
-                    while start < n {
-                        let end = min(start + maxLen, n)
-                        result.append(String(chars[start..<end]))
-                        if end == n { break }
-                        start = max(0, end - overlap)
-                    }
-                    return result
-                }
-
-                let chunks = chunk(content)
-                if chunks.isEmpty {
-                    let alert = NSAlert()
-                    alert.messageText = "Empty content"
-                    alert.informativeText = "The selected note does not contain content to embed. Make sure the note has body text starting from the fourth line."
-                    alert.alertStyle = .informational
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
-                    return
-                }
-
-                guard let apiKey = try await KeychainManager.shared.getApiKey(), !apiKey.isEmpty else {
-                    let alert = NSAlert()
-                    alert.messageText = "Qwen API Key missing"
-                    alert.informativeText = "No Qwen API Key was found in the Keychain. Please open Settings → Artificial Intelligence and save your API Key so embedding can proceed."
-                    alert.alertStyle = .warning
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
-                    return
-                }
-
-                let endpoint = URL(string: "https://ws-1ac7g9swxc2dszw3.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/embeddings")!
-
-                struct EmbeddingItem: Codable { let embedding: [Float] }
-                struct EmbeddingResp: Codable { let data: [EmbeddingItem] }
-
-                let decoder = JSONDecoder()
-                var vectors: [[Float]] = []
-                let batchSize = 20
-
-                for batchStart in stride(from: 0, to: chunks.count, by: batchSize) {
-                    let batchEnd = min(batchStart + batchSize, chunks.count)
-                    let batch = Array(chunks[batchStart..<batchEnd])
-
-                    var request = URLRequest(url: endpoint)
-                    request.httpMethod = "POST"
-                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                    request.httpBody = try JSONSerialization.data(withJSONObject: ["model": "qwen3.7-text-embedding", "input": batch])
-
-                    let (data, response) = try await URLSession.shared.data(for: request)
-                    guard let http = response as? HTTPURLResponse else {
-                        NSAlert(error: NSError(domain: "EmbedError", code: -1, userInfo: [NSLocalizedDescriptionKey: "Non-HTTP response from embedding service"])).runModal()
-                        return
-                    }
-
-                    if !(200..<300).contains(http.statusCode) {
-                        let serverMsg = String(data: data, encoding: .utf8) ?? "(no body)"
+            Task {
+                do {
+                    guard let fullNote = await noteViewModel.fetchFullNoteContent(id: noteId) else {
                         let alert = NSAlert()
-                        alert.messageText = "Embedding failed"
-                        alert.informativeText = "Server returned HTTP \(http.statusCode): \(serverMsg)"
+                        alert.messageText = "Note not found"
+                        alert.informativeText = "Cannot find the selected note in the database."
                         alert.alertStyle = .warning
                         alert.addButton(withTitle: "OK")
                         alert.runModal()
                         return
                     }
 
-                    let embResp = try decoder.decode(EmbeddingResp.self, from: data)
-                    if embResp.data.isEmpty {
+                    let raw = fullNote.documentJson ?? ""
+                    let parsed = ArticleMetadataParser().parse(raw)
+                    let title = parsed.title
+                    let publishDate = parsed.publishDate
+                    let urlString = parsed.url
+                    let tags: [String] = parsed.tags
+                    let content = parsed.content
+
+                    func chunk(_ text: String, maxLen: Int = 300, overlap: Int = 50) -> [String] {
+                        guard !text.isEmpty else { return [] }
+                        let chars = Array(text)
+                        var result: [String] = []
+                        var start = 0
+                        let n = chars.count
+                        while start < n {
+                            let end = min(start + maxLen, n)
+                            result.append(String(chars[start..<end]))
+                            if end == n { break }
+                            start = max(0, end - overlap)
+                        }
+                        return result
+                    }
+
+                    let chunks = chunk(content)
+                    if chunks.isEmpty {
+                        let alert = NSAlert()
+                        alert.messageText = "Empty content"
+                        alert.informativeText = "The selected note does not contain content to embed. Make sure the note has body text starting from the fourth line."
+                        alert.alertStyle = .informational
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                        return
+                    }
+
+                    guard let apiKey = try await KeychainManager.shared.getApiKey(), !apiKey.isEmpty else {
+                        let alert = NSAlert()
+                        alert.messageText = "Qwen API Key missing"
+                        alert.informativeText = "No Qwen API Key was found in the Keychain. Please open Settings → Artificial Intelligence and save your API Key so embedding can proceed."
+                        alert.alertStyle = .warning
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                        return
+                    }
+
+                    // ==========================================
+                    // 优雅调用：通过独立的 QWenEmbeddingService 批量获取向量
+                    // ==========================================
+                    let embeddingService = QWenEmbeddingService()
+                    let batchSize = 20
+                    var vectors: [[Float]] = []
+
+                    for batchStart in stride(from: 0, to: chunks.count, by: batchSize) {
+                        let batchEnd = min(batchStart + batchSize, chunks.count)
+                        let batch = Array(chunks[batchStart..<batchEnd])
+                        
+                        // 核心调用：传入文本批次与 apiKey，直接拿到对应结果
+                        let batchVectors = try await embeddingService.fetchEmbeddings(for: batch)
+                        vectors.append(contentsOf: batchVectors)
+                    }
+
+                    guard !vectors.isEmpty else {
                         let alert = NSAlert()
                         alert.messageText = "No embeddings"
-                        alert.informativeText = "Embedding API returned no vectors for a batch."
+                        alert.informativeText = "Embedding API returned no vectors."
                         alert.alertStyle = .warning
                         alert.addButton(withTitle: "OK")
                         alert.runModal()
                         return
                     }
-                    for item in embResp.data { vectors.append(item.embedding) }
-                }
 
-                guard !vectors.isEmpty else {
-                    let alert = NSAlert()
-                    alert.messageText = "No embeddings"
-                    alert.informativeText = "Embedding API returned no vectors."
-                    alert.alertStyle = .warning
-                    alert.addButton(withTitle: "OK")
-                    alert.runModal()
-                    return
-                }
-
-                let count = Float(vectors.count)
-                guard let dim = vectors.first?.count else {
-                    throw NSError(domain: "EmbedError", code: -2, userInfo: [NSLocalizedDescriptionKey: "Unexpected embedding shape"])
-                }
-                var avg = Array(repeating: Float(0), count: dim)
-                for v in vectors {
-                    if v.count == dim {
-                        for i in 0..<dim { avg[i] += v[i] }
-                    } else {
-                        throw NSError(domain: "EmbedError", code: -3, userInfo: [NSLocalizedDescriptionKey: "Inconsistent embedding dimension returned by API"])
+                    let count = Float(vectors.count)
+                    guard let dim = vectors.first?.count else {
+                        throw NSError(domain: "EmbedError", code: -2, userInfo: [NSLocalizedDescriptionKey: "Unexpected embedding shape"])
                     }
+                    var avg = Array(repeating: Float(0), count: dim)
+                    for v in vectors {
+                        if v.count == dim {
+                            for i in 0..<dim { avg[i] += v[i] }
+                        } else {
+                            throw NSError(domain: "EmbedError", code: -3, userInfo: [NSLocalizedDescriptionKey: "Inconsistent embedding dimension returned by API"])
+                        }
+                    }
+                    for i in 0..<dim { avg[i] /= count }
+
+                    let fm = FileManager.default
+                    let appSupport = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+                    let dir = appSupport.appendingPathComponent(Bundle.main.bundleIdentifier ?? "twigin").path
+                    let store = try Store(directoryPath: dir)
+                    let box = store.box(for: ArticleDataModel.self)
+
+                    let q = try box.query { ArticleDataModel.noteId == noteId }.build()
+                    let found = try q.find()
+                    if let existing = found.first {
+                        existing.noteId = noteId
+                        existing.title = title
+                        existing.content = content
+                        existing.url = urlString
+                        existing.tags = tags
+                        existing.publishDate = publishDate
+                        existing.embedding = avg
+                        try box.put(existing)
+                    } else {
+                        let entity = ArticleDataModel(noteId: noteId, title: title, content: content, url: urlString, tags: tags, publishDate: publishDate, embedding: avg)
+                        try box.put(entity)
+                    }
+
+                    debugPrintObjectBox(store: store)
+                    store.close()
+                    await MainActor.run { showAnimationNotification() }
+
+                } catch {
+                    let alert = NSAlert(error: error)
+                    alert.informativeText = error.localizedDescription
+                    alert.runModal()
                 }
-                for i in 0..<dim { avg[i] /= count }
-
-                let fm = FileManager.default
-                let appSupport = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-                let dir = appSupport.appendingPathComponent(Bundle.main.bundleIdentifier ?? "twigin").path
-                let store = try Store(directoryPath: dir)
-                let box = store.box(for: ArticleDataModel.self)
-
-                let q = try box.query { ArticleDataModel.noteId == noteId }.build()
-                let found = try q.find()
-                if let existing = found.first {
-                    existing.noteId = noteId
-                    existing.title = title
-                    existing.content = content
-                    existing.url = urlString
-                    existing.tags = tags
-                    existing.publishDate = publishDate
-                    existing.embedding = avg
-                    try box.put(existing)
-                } else {
-                    let entity = ArticleDataModel(noteId: noteId, title: title, content: content, url: urlString, tags: tags, publishDate: publishDate, embedding: avg)
-                    try box.put(entity)
-                }
-
-                debugPrintObjectBox(store: store)
-                store.close()
-                await MainActor.run { showAnimationNotification() }
-
-            } catch {
-                let alert = NSAlert(error: error)
-                alert.informativeText = error.localizedDescription
-                alert.runModal()
             }
         }
-    }
 
     private func debugPrintObjectBox(store s: Store?) {
         guard let store = s else {
@@ -270,7 +239,8 @@ struct MainSplitView: View {
                 dropZoneHeight: $dropZoneHeight,
                 isTargetedForDrop: $isTargetedForDrop,
                 focusedColumn: $focusedColumn,
-                isNewFolderFocused: $isNewFolderFocused
+                isNewFolderFocused: $isNewFolderFocused,
+                aiService: aiService
             )
         } content: {
             MainSplitViewMiddlePart(
@@ -316,6 +286,14 @@ struct MainSplitView: View {
 }
 
 #Preview {
-    MainSplitView()
-        .environmentObject(ThemeManager())
+    MainSplitView(
+        aiService: AIService(
+            provider: RoutingAIProvider(
+                localProvider: AppleFoundationProvider(),
+                cloudProvider: QWenProvider(),
+                tokenThreshold: 2000
+            )
+        )
+    )
+    .environmentObject(ThemeManager())
 }

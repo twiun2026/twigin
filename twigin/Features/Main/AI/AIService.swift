@@ -15,6 +15,38 @@ public enum AIServiceError: Error, Sendable {
     case unknown(String)
 }
 
+// MARK: - Routing Provider
+
+/// A provider that routes requests between a local and a cloud provider based on a token threshold.
+public final class RoutingAIProvider: AIProvider {
+    private let localProvider: any AIProvider
+    private let cloudProvider: any AIProvider
+    private let tokenThreshold: Int
+
+    public init(localProvider: any AIProvider, cloudProvider: any AIProvider, tokenThreshold: Int = 1000) {
+        self.localProvider = localProvider
+        self.cloudProvider = cloudProvider
+        self.tokenThreshold = tokenThreshold
+    }
+
+    public func stream(request: AIRequest) -> AsyncThrowingStream<String, any Error> {
+        let estimatedTokens = estimateTokens(for: request)
+        if estimatedTokens <= tokenThreshold {
+            print("[RoutingProvider] Using Apple Foundation Model (Tokens: ~\(estimatedTokens))")
+            return localProvider.stream(request: request)
+        } else {
+            print("[RoutingProvider] Using QWen Model (Tokens: ~\(estimatedTokens))")
+            return cloudProvider.stream(request: request)
+        }
+    }
+
+    private func estimateTokens(for request: AIRequest) -> Int {
+        let totalText = (request.context ?? "") + " " + request.prompt
+        return max(1, totalText.count / 3)
+    }
+}
+
+
 extension AIServiceError: LocalizedError {
     public var errorDescription: String? {
         switch self {

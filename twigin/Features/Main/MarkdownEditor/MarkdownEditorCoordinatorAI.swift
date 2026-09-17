@@ -18,7 +18,7 @@ extension MarkdownTextView.Coordinator {
             let docRange = contentManager.documentRange
             
             guard var currentLocation: NSTextLocation = contentManager.location(docRange.location, offsetBy: initialIndex) else { return }
-            let eventStream = await self.aiAppleService.execute(request: request)
+            let eventStream = await self.aiService.execute(request: request)
             
             do {
                 for try await event in eventStream {
@@ -46,52 +46,6 @@ extension MarkdownTextView.Coordinator {
             } catch {
                 print("Stream error: \(error)")
             }
-        }
-    }
-    
-    func routeContextMenuAI(commandIndex: Int, selectedText: String, tokenCount: Int) -> (AIService, String) {
-        let wordLimit = 4000 - tokenCount
-        switch commandIndex {
-        case 0:
-            let prompt = """
-                    Translate the following text into Chinese. Maintain the EXACT same number of paragraphs as the source text, separated by empty lines. Output ONLY the translated text:
-
-                    \(selectedText)
-                    """
-            return (tokenCount <= 1900 ? aiAppleService : aiQWenService, prompt)
-            
-        case 1:
-            let prompt = """
-                    Summarize the following single paragraph into 1-2 concise sentences. 
-                    Do not copy verbatim. Output plain text only:
-
-                    \(selectedText)
-                    """
-            return (tokenCount <= 2500 ? aiAppleService : aiQWenService, prompt)
-            
-        case 2:
-            let prompt = """
-                    Extract key points from the following text as a bullet list.
-                    Provide EXACTLY ONE bullet point per paragraph corresponding to the source text.
-                    Format each line starting with a dash (e.g. - Key point).
-                    Output ONLY the bullet list:
-
-                    \(selectedText)
-                    """
-            return (tokenCount <= 3000 ? aiAppleService : aiQWenService, prompt)
-            
-        case 3:
-            let prompt = """
-                    Rewrite the following text more concisely while preserving meaning.
-                    Maintain the EXACT same number of paragraphs as the source text, separated by empty lines.
-                    Output ONLY the rewritten text:
-
-                    \(selectedText)
-                    """
-            return (tokenCount <= 2000 ? aiAppleService : aiQWenService, prompt)
-            
-        default:
-            return (aiAppleService, selectedText)
         }
     }
     
@@ -307,20 +261,14 @@ extension MarkdownTextView.Coordinator {
               selectedRange.length > 0 else { return }
         
         let selectedText = nsString.substring(with: selectedRange)
-        let tokenCount = selectedText.count
         
-        let (service, prompt) = routeContextMenuAI(
-            commandIndex: commandIndex,
-            selectedText: selectedText,
-            tokenCount: tokenCount
-        )
-        
-        let titles = ["Translate", "Summarize", "Key Points", "Concise"]
-        let title = commandIndex < titles.count ? titles[commandIndex] : "AI Action"
+        // 核心改变：不再手写长 Prompt 和 token 逻辑，而是直接从 AIPromptFactory 获取结构化请求与标题
+        guard let request = AIPromptFactory.makeRequest(forCommandIndex: commandIndex, selectedText: selectedText) else { return }
+        let title = AIPromptFactory.title(forCommandIndex: commandIndex)
         
         showAIPopover(title: title, anchorCharOffset: selectedRange.location)
         
-        let request = AIRequest(command: .ask, prompt: prompt)
-        aiPopoverController?.startStreaming(service: service, request: request)
+        // 直接丢给统一的 aiService 执行，底层自动根据路由规则选择模型
+        aiPopoverController?.startStreaming(service: aiService, request: request)
     }
 }

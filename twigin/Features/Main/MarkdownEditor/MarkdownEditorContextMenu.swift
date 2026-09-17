@@ -1,5 +1,4 @@
 import AppKit
-import FoundationModels
 
 // MARK: - Context Menu & AI Extensions
 extension MarkdownTextView.Coordinator {
@@ -137,26 +136,8 @@ extension MarkdownTextView.Coordinator {
 
             contextMenuAITask = Task { @MainActor [weak self, weak controller] in
                 guard let self, let controller else { return }
-
-                // Accurate token count for provider routing.
-                let tokenCount: Int
-                if #available(macOS 26.4, *) {
-                    do {
-                        tokenCount = try await SystemLanguageModel.default.tokenCount(for: action.selectedText)
-                    } catch {
-                        tokenCount = max(1, action.selectedText.count / 4)
-                    }
-                } else {
-                    tokenCount = max(1, action.selectedText.count / 4)
-                }
-
-                let (service, prompt) = self.routeContextMenuAI(
-                    commandIndex: action.commandIndex,
-                    selectedText: action.selectedText,
-                    tokenCount: tokenCount
-                )
-                let request = AIRequest(command: .ask, prompt: prompt)
-                controller.startStreaming(service: service, request: request)
+                guard let request = AIPromptFactory.makeRequest(forCommandIndex: action.commandIndex, selectedText: action.selectedText) else { return }
+                controller.startStreaming(service: self.aiService, request: request)
             }
         }
 

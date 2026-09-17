@@ -3,6 +3,7 @@ import FoundationModels
 import SwiftUI
 import UniformTypeIdentifiers
 
+
 struct MarkdownEditorView: View {
     @Binding var text: String
     var theme: AppTheme
@@ -10,7 +11,6 @@ struct MarkdownEditorView: View {
     var fontSize: CGFloat = 14
     var lineSpacing: CGFloat = 0
     var focusRequest: UUID? = nil
-    // Optional Prompt popover VM to attach for variable extraction
     var promptPopoverVM: PromptPopoverViewModel? = nil
 
     var body: some View {
@@ -60,7 +60,6 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.font = Self.resolvedFont(for: fontName, size: fontSize)
 
         context.coordinator.bind(textView: textView)
-        // If a prompt VM was provided, the coordinator will attach it when binding
         textView.textStorage?.delegate = context.coordinator
 
         context.coordinator.lastRenderedTheme = theme
@@ -79,7 +78,6 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.autoresizingMask = [.width, .height]
         scrollView.documentView = textView
 
-        // 注册滚动事件监听，驱动视口外区域的按需补渲
         context.coordinator.setupScrollObserver(on: scrollView)
 
         return scrollView
@@ -155,21 +153,18 @@ struct MarkdownTextView: NSViewRepresentable {
         ]
     }
 
-        @MainActor final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate, NSTextContentStorageDelegate, @unchecked Sendable {
+    @MainActor final class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate, NSTextContentStorageDelegate, @unchecked Sendable {
     
-         var parent: MarkdownTextView
+        var parent: MarkdownTextView
         weak var textView: MarkdownNativeTextView?
-         // Weak reference to the PromptPopoverViewModel to avoid retain cycles
-         private weak var promptPopoverVM: PromptPopoverViewModel?
+        private weak var promptPopoverVM: PromptPopoverViewModel?
         
-        //渲染状态
         var lastRenderedTheme: AppTheme? = nil
         var lastRenderedFontName: String = ""
         var lastRenderedFontSize: CGFloat = 14
         var lastRenderedLineSpacing: CGFloat = 0
         private var lastConsumedFocusRequest: UUID?
         
-        //引擎与状态控制
         let renderer: MarkdownRenderer
         let engine = MarkdownParsingEngine()
         var editSerial: UInt64 = 0
@@ -178,25 +173,20 @@ struct MarkdownTextView: NSViewRepresentable {
         var suppressStringSync = false
         var hasPendingEdit = false
         
-        //AI状态
         private let aiParser = AICommandParser()
-        let aiAppleService = AIService(provider: AppleFoundationProvider())
-        let aiQWenService = AIService(provider: QWenProvider())
+        
+        /// 统一的 AIService，内部已通过 RoutingAIProvider 实现了本地与云端的智能调度，UI 层零感知
+        var aiService: AIService
         var aiTask: Task<Void, Never>?
         var contextMenuAITask: Task<Void, Never>?
         var aiPopoverController: AiPopoverController?
         
-        // Selection and cached Block
         var lastSelectedRange: NSRange? = nil
         var cachedBlocks: [MarkdownBlock] = []
         var isInsertingText = false
 
-        // 视口惰性渲染：全量加载时缓存所有块，仅对视口范围写属性；
-        // 随用户滚动由 renderViewportIfNeeded 按需补全样式。
         var pendingAllBlocks: [MarkdownBlock] = []
-        // 已完成样式渲染的字符区间集合（避免重复 setAttributes）
         var styledRanges = IndexSet()
-        // NSView.boundsDidChangeNotification observer，用于监听滚动事件
         nonisolated(unsafe) var boundsObserver: (any NSObjectProtocol)?
 
         deinit {
@@ -205,20 +195,25 @@ struct MarkdownTextView: NSViewRepresentable {
             }
         }
 
-         init(parent: MarkdownTextView, promptVM: PromptPopoverViewModel?) {
-             self.parent = parent
-             self.promptPopoverVM = promptVM
+        init(parent: MarkdownTextView, promptVM: PromptPopoverViewModel?) {
+            self.parent = parent
+            self.promptPopoverVM = promptVM
             self.renderer = MarkdownRenderer()
+
+            let local = AppleFoundationProvider()
+            let cloud = QWenProvider()
+            let routing = RoutingAIProvider(localProvider: local, cloudProvider: cloud, tokenThreshold: 2000)
+            self.aiService = AIService(provider: routing)
+
             super.init()
 
-            // Resolve Keychain-stored QWen API key and update provider at runtime.
             Task {
                 do {
                     if let key = try await KeychainManager.shared.getApiKey(), !key.isEmpty {
                         let provider = QWenProvider(configuration: QWenProvider.Configuration(apiKey: key))
-                        await aiQWenService.updateProvider(provider)
+                        let updatedRouting = RoutingAIProvider(localProvider: local, cloudProvider: provider, tokenThreshold: 2000)
+                        await self.aiService.updateProvider(updatedRouting)
                     } else {
-                        // No key found — inform the user once.
                         let alert = NSAlert()
                         alert.messageText = "Qwen API Key missing"
                         alert.informativeText = "No Qwen API Key was found in the Keychain. Please open Settings → Artificial Intelligence and save your API Key so the Qwen provider can authenticate requests."
@@ -237,7 +232,6 @@ struct MarkdownTextView: NSViewRepresentable {
         func bind(textView: MarkdownNativeTextView) {
             self.textView = textView
             if let vm = promptPopoverVM {
-                // Attach the prompt VM to the underlying NSTextView for variable observation
                 vm.attach(to: textView)
             }
         }
@@ -258,8 +252,6 @@ struct MarkdownTextView: NSViewRepresentable {
             }
         }
 
-        // MARK: 加载内容
-        // 直接设置内容，触发渲染
         @MainActor func setContent(_ text: String, on textView: MarkdownNativeTextView) {
             isLoadingContent = true
             textView.string = text
@@ -267,21 +259,14 @@ struct MarkdownTextView: NSViewRepresentable {
             load(text: text)
         }
 
-        // MARK: 加载内容到引擎
-        // 该方法会增加 editSerial，确保异步加载的结果不会覆盖后续的编辑
-        // 该方法会在加载完成后触发全量渲染
         private func load(text: String) {
             editSerial &+= 1
             needsFullCatchup = false
             let expected = editSerial
 
-            // 将 AST 语法树解析派发至后台高优先级队列，避免阻塞 Main Thread
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self = self else { return }
-                
-                // 调用你现有的 engine.load
                 self.engine.load(text: text) { [weak self] snapshot in
-                    // 解析完成后，切回主线程进行视口渲染与数据校验
                     DispatchQueue.main.async {
                         guard let self = self,
                               self.editSerial == expected,
@@ -295,8 +280,6 @@ struct MarkdownTextView: NSViewRepresentable {
             }
         }
 
-        // MARK: 重渲染
-        // 主题 / 字体变化时触发：重置已渲染区间记录，确保整篇重新应用新样式
         func rerenderFull() {
             styledRanges.removeAll()
             let expected = editSerial
@@ -311,8 +294,6 @@ struct MarkdownTextView: NSViewRepresentable {
                 }
             }
         }
-
-        // MARK: NSTextStorageDelegate
 
         func textStorage(
             _ textStorage: NSTextStorage,
@@ -355,12 +336,9 @@ struct MarkdownTextView: NSViewRepresentable {
                 needsFullCatchup = false
                 catchUpFullRender(expectedSerial: result.serial)
             } else if let diff = result.blockDiff, !diff.isEmpty {
-                // 增量渲染内部已调用 renderer.invalidateLayout(in:affectedRanges:)
                 renderIncremental(affectedRange: result.affectedRange, blockDiff: diff, allBlocks: result.allBlocks)
             } else {
                 hasPendingEdit = false
-                // 即便语法树没有生成 blockDiff（如普通文本输入），如果带有 affectedRange，
-                // 仅让受影响的段落局部排版生效（通常 TextKit 2 已自动处理，必要时仅失效最小区间）
                 if let affected = result.affectedRange {
                     renderer.invalidateLayout(in: textView, affectedRanges: [affected])
                 }
@@ -383,8 +361,6 @@ struct MarkdownTextView: NSViewRepresentable {
             }
         }
 
-        // MARK: NSTextContentStorageDelegate
-
         var checkboxAttachmentCache: [Bool: NSTextAttachment] = [:]
         var checkboxThemeKey: AppTheme?
         var checkboxFontKey: String = ""
@@ -404,8 +380,6 @@ struct MarkdownTextView: NSViewRepresentable {
             return NSTextParagraph(attributedString: paragraph)
         }
 
-        // MARK: 渲染
-
         @MainActor private func renderIncremental(affectedRange: NSRange?, blockDiff: MarkdownBlockDiff, allBlocks: [MarkdownBlock]) {
             guard let textView else { return }
             hasPendingEdit = false
@@ -421,7 +395,6 @@ struct MarkdownTextView: NSViewRepresentable {
             guard let textView else { return }
             hasPendingEdit = false
             self.cachedBlocks = blocks
-            // 缓存全量块供后续滚动补渲，并重置已渲染区间记录
             self.pendingAllBlocks = blocks
             self.styledRanges.removeAll()
 
@@ -429,12 +402,6 @@ struct MarkdownTextView: NSViewRepresentable {
             renderer.baseFontSize = parent.fontSize
             renderer.lineSpacingMultiplier = parent.lineSpacing
 
-            // 计算当前视口字符区间（初次打开时退化为文档头部固定窗口）。
-            // 将 affectedRange 设为视口区间而非 nil：
-            //   • makeRenderPlan 的全量路径使用 affectedRange 作为 setAttributes 范围，
-            //     因此只有视口内的块才会被赋予 Markdown 样式，O(Viewport) 而非 O(N)。
-            //   • 视口外区域保持 NSTextStorage 的纯文本默认外观（textView.string = text 注入后的状态），
-            //     TextKit 2 内部的视口驱动排版机制确保这些区域在排版前不会触发 CPU 开销。
             let vpRange = MarkdownRenderer.viewportCharRange(in: textView)
             let document = MarkdownDocument(
                 source: "",
@@ -445,7 +412,6 @@ struct MarkdownTextView: NSViewRepresentable {
             )
             renderer.render(makeContext(textView: textView, document: document))
 
-            // 将视口区间标记为已渲染
             if vpRange.length > 0, let r = Range(vpRange) {
                 styledRanges.insert(integersIn: r)
             }
@@ -456,11 +422,6 @@ struct MarkdownTextView: NSViewRepresentable {
             lastRenderedLineSpacing = parent.lineSpacing
         }
 
-        // MARK: - 滚动补渲
-
-        /// 当用户滚动到尚未渲染的区域时，对新进入视口的块补全 Markdown 样式。
-        /// 此方法由滚动通知触发（见 setupScrollObserver），仅在有未渲染内容时才执行渲染，
-        /// 与增量打字渲染（renderIncremental）完全独立，互不干扰。
         @MainActor private func renderViewportIfNeeded() {
             guard let textView,
                   let storage = textView.textStorage,
@@ -470,25 +431,20 @@ struct MarkdownTextView: NSViewRepresentable {
             let vpRange = MarkdownRenderer.viewportCharRange(in: textView)
             guard vpRange.length > 0, let vpSwiftRange = Range(vpRange) else { return }
 
-            // 从视口区间中去掉已渲染部分，得到待补渲的字符区间集合（IndexSet 原生支持集合差）
             var unstyledSet = IndexSet(integersIn: vpSwiftRange)
             unstyledSet.subtract(styledRanges)
             guard !unstyledSet.isEmpty else { return }
 
-            // 将未渲染区间转换为 NSRange 列表，供后续块过滤
             let unstyledRanges: [NSRange] = unstyledSet.rangeView.map { NSRange($0) }
 
-            // 找出所有与未渲染区间重叠的块
             let blocksToRender = pendingAllBlocks.filter { block in
                 unstyledRanges.contains { $0.overlaps(block.lineRange) }
             }
             guard !blocksToRender.isEmpty else {
-                // 无待渲染块（可能是空行区域），直接标记视口为已渲染
                 styledRanges.insert(integersIn: vpSwiftRange)
                 return
             }
 
-            // 计算待渲染块的字符区间联合，作为本次 setAttributes 的 affectedRange
             let unionRange = blocksToRender.reduce(blocksToRender[0].lineRange) {
                 NSUnionRange($0, $1.lineRange)
             }
@@ -503,19 +459,15 @@ struct MarkdownTextView: NSViewRepresentable {
             renderer.baseFontSize = parent.fontSize
             renderer.lineSpacingMultiplier = parent.lineSpacing
 
-            // 复用全量渲染路径：affectedRange 限定为本次需补渲的区间，
-            // blockDiff 为 nil 走全量分支，explicitBlocks 传入全量块供范围过滤。
             let doc = MarkdownDocument(
                 source: "", affectedRange: clamped, blockDiff: nil,
                 revision: 0, explicitBlocks: pendingAllBlocks
             )
             renderer.render(makeContext(textView: textView, document: doc))
 
-            // 将整个视口区间标记为已渲染（保守策略，避免同区间反复触发）
             styledRanges.insert(integersIn: vpSwiftRange)
         }
 
-        /// 注册滚动通知，内容视图的 bounds 变化即代表滚动事件。
         func setupScrollObserver(on scrollView: NSScrollView) {
             scrollView.contentView.postsBoundsChangedNotifications = true
             boundsObserver = NotificationCenter.default.addObserver(
@@ -523,7 +475,6 @@ struct MarkdownTextView: NSViewRepresentable {
                 object: scrollView.contentView,
                 queue: .main
             ) { [weak self] _ in
-                // 已在主队列（queue: .main），通过 Task 跳转到 MainActor 隔离域
                 Task { @MainActor [weak self] in
                     self?.renderViewportIfNeeded()
                 }
@@ -546,8 +497,6 @@ struct MarkdownTextView: NSViewRepresentable {
             )
         }
 
-        // MARK: Return key continuation
-
         @MainActor func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             if commandSelector == #selector(NSResponder.deleteBackward(_:)),
                let selectedRange = textView.selectedRanges.first?.rangeValue,
@@ -557,13 +506,11 @@ struct MarkdownTextView: NSViewRepresentable {
                 let lineRange = nsString.lineRange(for: selectedRange)
                 let lineText = nsString.substring(with: lineRange)
 
-                // 调用 Handler 处理删除逻辑
                 if MarkdownBlockquote.handleDeleteBackward(in: lineText, lineRange: lineRange, textView: textView) {
                     return true
                 }
             }
             
-            // MARK: - 2. 处理 回车键 (Insert Newline)
             guard commandSelector == #selector(NSResponder.insertNewline(_:)),
                   let selectedRange = textView.selectedRanges.first?.rangeValue else { return false }
 
@@ -596,7 +543,6 @@ struct MarkdownTextView: NSViewRepresentable {
                         textView.insertText(autoInsertText, replacementRange: currentSelectedRange)
                         textView.didChangeText()
                     }
-                    print("to handleAiRequest")
                     handleAIRequest(aiRequest, targetTextView: textView)
 
                     return true
@@ -650,7 +596,6 @@ struct MarkdownTextView: NSViewRepresentable {
                 }
             }
 
-            //在此处调用 Handler 处理引用块的回车逻辑（自动续行 / 连续回车退出）
             if MarkdownBlockquote.handleInsertNewline(in: lineText, lineRange: lineRange, selectedRange: selectedRange, textView: textView) {
                 return true
             }
