@@ -19,7 +19,7 @@ struct MainSplitView: View {
     @State private var showConfetti: Bool = false
 
     @State private var selectedNoteIds: Set<NoteModel.ID> = []
-    @State private var droppedNotes: [NoteModel] = []
+    @State private var droppedNotes: [DroppedItem] = []
     @State private var dropZoneHeight: CGFloat = 180
     @State private var isTargetedForDrop: Bool = false
 

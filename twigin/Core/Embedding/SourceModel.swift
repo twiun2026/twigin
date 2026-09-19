@@ -15,10 +15,10 @@ class SourceModel {
     
     required init() {}
     
-    init(noteId: String, title: String, author: String? = nil, content: String, url: String? = nil, tags: [String], publishDate: Date = Date(), embedding: [Float]) {
+    init(noteId: String, title: String, author: String? = nil, content: String, url: String? = nil, tags: [String] = [], publishDate: Date = Date(), embedding: [Float] = []) {
         self.noteId = noteId
         self.title = title
-        self.author = nil
+        self.author = author
         self.content = content
         self.url = url
         self.tags = tags

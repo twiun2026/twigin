@@ -46,55 +46,55 @@ extension SourceModel {
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { ArticleDataModel.id == myId }
+    ///     box.query { SourceModel.id == myId }
     internal static var id: Property<SourceModel, Id, Id> { return Property<SourceModel, Id, Id>(propertyId: 1, isPrimaryKey: true) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { ArticleDataModel.noteId.startsWith("X") }
+    ///     box.query { SourceModel.noteId.startsWith("X") }
     internal static var noteId: Property<SourceModel, String, Void> { return Property<SourceModel, String, Void>(propertyId: 2, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { ArticleDataModel.title.startsWith("X") }
+    ///     box.query { SourceModel.title.startsWith("X") }
     internal static var title: Property<SourceModel, String, Void> { return Property<SourceModel, String, Void>(propertyId: 3, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { ArticleDataModel.author.startsWith("X") }
+    ///     box.query { SourceModel.author.startsWith("X") }
     internal static var author: Property<SourceModel, String?, Void> { return Property<SourceModel, String?, Void>(propertyId: 4, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { ArticleDataModel.content.startsWith("X") }
+    ///     box.query { SourceModel.content.startsWith("X") }
     internal static var content: Property<SourceModel, String, Void> { return Property<SourceModel, String, Void>(propertyId: 5, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { ArticleDataModel.url.startsWith("X") }
+    ///     box.query { SourceModel.url.startsWith("X") }
     internal static var url: Property<SourceModel, String?, Void> { return Property<SourceModel, String?, Void>(propertyId: 6, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { ArticleDataModel.tags.containsElement(element: "<value>", caseSensitive: true) }
+    ///     box.query { SourceModel.tags.containsElement(element: "<value>", caseSensitive: true) }
     internal static var tags: Property<SourceModel, StringArrayPropertyType, Void> { return Property<SourceModel, StringArrayPropertyType, Void>(propertyId: 7, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { ArticleDataModel.publishDate > 1234 }
+    ///     box.query { SourceModel.publishDate > 1234 }
     internal static var publishDate: Property<SourceModel, Date, Void> { return Property<SourceModel, Date, Void>(propertyId: 8, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { ArticleDataModel.embedding.isGreaterThan(value) }
+    ///     box.query { SourceModel.embedding.isGreaterThan(value) }
     internal static var embedding: Property<SourceModel, FloatArrayPropertyType, Void> { return Property<SourceModel, FloatArrayPropertyType, Void>(propertyId: 9, isPrimaryKey: false) }
 
     fileprivate func __setId(identifier: ObjectBox.Id) {
@@ -178,7 +178,7 @@ extension ObjectBox.Property where E == SourceModel {
 }
 
 
-/// Generated service type to handle persisting and reading entity data. Exposed through `ArticleDataModel.EntityBindingType`.
+/// Generated service type to handle persisting and reading entity data. Exposed through `SourceModel.EntityBindingType`.
 internal final class SourceModelBinding: ObjectBox.EntityBinding, Sendable {
     internal typealias EntityType = SourceModel
     internal typealias IdType = Id
@@ -242,7 +242,7 @@ fileprivate func optConstruct<T: RawRepresentable>(_ type: T.Type, rawValue: T.R
 
 // MARK: - Store setup
 
-    fileprivate func cModel() throws -> OpaquePointer {
+fileprivate func cModel() throws -> OpaquePointer {
     let modelBuilder = try ObjectBox.ModelBuilder()
     try SourceModel.buildEntity(modelBuilder: modelBuilder)
     modelBuilder.lastEntity(id: 3, uid: 1078083903610208512)
@@ -253,7 +253,7 @@ extension ObjectBox.Store {
     /// A store with a fully configured model. Created by the code generator with your model's metadata in place.
     ///
     /// # In-memory database
-    /// To use a file-less in-memory database, instead of a directory path pass `memory:`
+    /// To use a file-less in-memory database, instead of a directory path pass `memory:` 
     /// together with an identifier string:
     /// ```swift
     /// let inMemoryStore = try Store(directoryPath: "memory:test-db")

@@ -1,12 +1,13 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import ObjectBox
 
 struct MainSplitViewLeftPart: View {
     @ObservedObject var folderViewModel: FolderListViewModel
     @ObservedObject var noteViewModel: NoteListViewModel
     @Binding var selectedFolderId: FolderModel.ID?
-    @Binding var droppedNotes: [NoteModel]
+    @Binding var droppedNotes: [DroppedItem]
     @Binding var dropZoneHeight: CGFloat
     @Binding var isTargetedForDrop: Bool
     var focusedColumn: FocusState<ActiveFocusColumn?>.Binding
@@ -77,44 +78,46 @@ struct MainSplitViewLeftPart: View {
 
                         Button {
                             Task {
-                                guard let dao = SQLiteDAO.shared else { return }
-                                guard let promptNote = droppedNotes.first(where: { $0.isPrompt }) else { return }
-
-                                var assembledArticles = ""
-                                for note in droppedNotes where !note.isPrompt {
-                                    do {
-                                        if let dbNote = try dao.note.get(id: note.id) {
-                                            assembledArticles += "\n\(dbNote.documentJson ?? "")\n\n"
-                                        }
-                                    } catch {
-                                        print("Failed to read note: \(error)")
+                                // Ensure we have at least one prompt among dropped items
+                                guard droppedNotes.contains(where: { $0.isPrompt }) else {
+                                    await MainActor.run {
+                                        let alert = NSAlert()
+                                        alert.messageText = "Lack a prompt!"
+                                        alert.informativeText = "Please drop at least one prompt from Prompt Library."
+                                        alert.alertStyle = .warning
+                                        alert.addButton(withTitle: "OK")
+                                        alert.runModal()
                                     }
+                                    return
                                 }
 
-                                do {
-                                    if let promptModel = try await dao.prompt.get(id: promptNote.id) {
-                                        let result = promptModel.content.replacingOccurrences(of: "{{articles}}", with: assembledArticles)
-                                        print("result: \(result)")
-                                        // ==========================================
-                                        // 丢给已注入的 aiService，完全不耦合具体 Provider
-                                        // ==========================================
-                                        let aiRequest = AIRequest(command: .ask, prompt: result)
-                                        let eventStream = await aiService.execute(request: aiRequest)
-                                        for try await event in eventStream {
-                                            switch event {
-                                            case .chunk(let textChunk):
-                                                print(textChunk, terminator: "")
-                                            case .completed:
-                                                print("\n--- Completed ---")
-                                            case .failed(let error):
-                                                print("\nError: \(error.localizedDescription)")
-                                            default:
-                                                break
-                                            }
-                                        }
+                                // Assemble articles string from dropped items
+                                let assembled = await assembleArticles(from: droppedNotes)
+
+                                // Find first prompt to use as base
+                                guard let promptItem = droppedNotes.first(where: { $0.isPrompt }) else { return }
+                                var promptContent = ""
+                                switch promptItem {
+                                case .prompt(let pm): promptContent = pm.content
+                                default: break
+                                }
+
+                                let finalPrompt = promptContent.replacingOccurrences(of: "{{articles}}", with: assembled)
+
+                                print("result: \(finalPrompt)")
+                                // call aiService (provider-agnostic)
+                                let aiRequest = AIRequest(command: .ask, prompt: finalPrompt)
+                                let eventStream = await aiService.execute(request: aiRequest)
+                                for try await event in eventStream {
+                                    switch event {
+                                    case .chunk(let textChunk):
+                                        print(textChunk, terminator: "")
+                                    case .completed:
+                                        print("\n--- Completed ---")
+                                    case .failed(let error):
+                                        print("\nError: \(error.localizedDescription)")
+                                    default: break
                                     }
-                                } catch {
-                                    print("DB Error: \(error)")
                                 }
                             }
                         } label: {
@@ -130,8 +133,8 @@ struct MainSplitViewLeftPart: View {
                 .padding(.vertical, 6)
 
                 List {
-                    ForEach(droppedNotes) { note in
-                        droppedNoteRow(for: note)
+                    ForEach(droppedNotes, id: \ .id) { item in
+                        droppedNoteRow(for: item)
                     }
                 }
                 .scrollContentBackground(.hidden)
@@ -143,7 +146,7 @@ struct MainSplitViewLeftPart: View {
                         _ = provider.loadObject(ofClass: NSString.self) { string, _ in
                             guard let idsString = string as? String else { return }
                             Task { @MainActor in
-                                self.handleDroppedStrings(idsString)
+                                await handleDroppedStrings(idsString)
                             }
                         }
                     }
@@ -159,23 +162,111 @@ struct MainSplitViewLeftPart: View {
         .focused(focusedColumn, equals: .folderList)
     }
     
-    private func droppedNoteRow(for note: NoteModel) -> some View {
-        DroppedNoteRowView(note: note) {
-            let noteId = note.id
-            droppedNotes.removeAll { item in
-                item.id == noteId
+    private func droppedNoteRow(for item: DroppedItem) -> some View {
+        // Render a simple row for the dropped item; reuse existing DroppedNoteRowView style
+        HStack(spacing: 8) {
+            Button {
+                let itemId = item.id
+                droppedNotes.removeAll { $0.id == itemId }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+
+            Text(item.title)
+                .lineLimit(1)
+                .font(.subheadline)
+                .foregroundColor(themeManager.currentTheme.textMain)
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(Color.clear)
+    }
+    
+    private func handleDroppedStrings(_ idsString: String) async {
+        let idStrings = idsString.split(separator: ",").map(String.init)
+        for idString in idStrings {
+            // Avoid duplicates
+            if droppedNotes.contains(where: { $0.id == idString }) { continue }
+
+            // 1) Try prompts (SQLite)
+            if let dao = SQLiteDAO.shared {
+                if let prompt = try? await dao.prompt.get(id: idString) {
+                    await MainActor.run { droppedNotes.append(.prompt(prompt)) }
+                    continue
+                }
+            }
+
+            // 2) Try regular notes (SQLite)
+            if let dao = SQLiteDAO.shared {
+                if let note = try? dao.note.get(id: idString) {
+                    await MainActor.run { droppedNotes.append(.note(note)) }
+                    continue
+                }
+            }
+
+            // 3) Try ObjectBox SourceModel
+            if let dir = objectBoxDir(), let store = try? Store(directoryPath: dir) {
+                defer { store.close() }
+                let box = store.box(for: SourceModel.self)
+                if let q = try? box.query({ SourceModel.noteId == idString }).build(), let found = try? q.find().first {
+                    await MainActor.run { droppedNotes.append(.source(found)) }
+                    continue
+                }
             }
         }
     }
     
-    private func handleDroppedStrings(_ idsString: String) {
-        let idStrings = idsString.split(separator: ",").map(String.init)
-        for idString in idStrings {
-            guard let found = noteViewModel.notes.first(where: { $0.id == idString }) else { continue }
-            if !droppedNotes.contains(where: { $0.id == found.id }) {
-                droppedNotes.append(found)
+    // Assemble articles: gather documentJson / content from NoteModel and SourceModel dropped items.
+    private func assembleArticles(from items: [DroppedItem]) async -> String {
+        var parts: [String] = []
+
+        for item in items {
+            switch item {
+            case .note(let n):
+                if let dao = SQLiteDAO.shared {
+                    if let dbNote = try? dao.note.get(id: n.id) {
+                        if let doc = dbNote.documentJson, !doc.isEmpty {
+                            parts.append(doc)
+                        } else {
+                            parts.append(dbNote.title)
+                        }
+                    } else {
+                        // fallback to the NoteModel snapshot
+                        if let doc = n.documentJson, !doc.isEmpty { parts.append(doc) } else { parts.append(n.title) }
+                    }
+                } else {
+                    if let doc = n.documentJson, !doc.isEmpty { parts.append(doc) } else { parts.append(n.title) }
+                }
+
+            case .prompt(_):
+                // prompts are not part of the articles body; skip here
+                continue
+
+            case .source(let s):
+                // SourceModel is an ObjectBox entity; use its fields
+                var entryParts: [String] = []
+                if let author = s.author, !author.isEmpty { entryParts.append("Author: \(author)") }
+                if let url = s.url, !url.isEmpty { entryParts.append("URL: \(url)") }
+                // publish date
+                entryParts.append("Published: \(s.publishDate)")
+                // content
+                if !s.content.isEmpty { entryParts.append(s.content) }
+                let entry = entryParts.joined(separator: "\n")
+                if !entry.isEmpty { parts.append(entry) }
             }
         }
+
+        return parts.joined(separator: "\n\n")
+    }
+
+    // Helper to compute ObjectBox app support directory path
+    private func objectBoxDir() -> String? {
+        guard let appSupport = try? FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask, appropriateFor: nil, create: true
+        ) else { return nil }
+        return appSupport.appendingPathComponent(Bundle.main.bundleIdentifier ?? "twigin").path
     }
     
 }

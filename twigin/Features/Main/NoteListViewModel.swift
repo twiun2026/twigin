@@ -68,7 +68,8 @@ class NoteListViewModel: ObservableObject {
                 defer { store.close() }
                 let box = store.box(for: SourceModel.self)
                 let entity = SourceModel(noteId: newId, title: "New Article", content: "", tags: [], embedding: [])
-                try? box.put(entity)
+                // Explicitly ignore the optional result to avoid the "Result of 'try?' is unused" warning
+                _ = try? box.put(entity)
                 loadNotes(for: folderId)
             }
         case .regular:
@@ -108,7 +109,7 @@ class NoteListViewModel: ObservableObject {
                 let box = store.box(for: SourceModel.self)
                 let q = try? box.query { SourceModel.noteId == id }.build()
                 let found = (try? q?.find()) ?? []
-                for e in found { try? box.remove(e.id) }
+                for e in found { _ = try? box.remove(e.id) }
                 loadNotes(for: currentFolderId)
             }
         case .regular:
@@ -167,7 +168,7 @@ class NoteListViewModel: ObservableObject {
                 if let existing = try? q?.find().first {
                     existing.title = cleanTitle
                     existing.content = content
-                    try? box.put(existing)
+                    _ = try? box.put(existing)
                 }
             }
         case .regular:
