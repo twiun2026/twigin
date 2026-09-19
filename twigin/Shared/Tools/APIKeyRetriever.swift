@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - AIKeyRetriever
 /// 统一负责管理和动态获取 AI 模型所需的 API Key
-public enum AIKeyRetriever {
+public enum APIKeyRetriever {
     
     /// 从 Keychain 中异步获取指定的 API Key。
     /// - Parameters:

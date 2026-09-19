@@ -5,7 +5,7 @@
   "entities": [
     {
       "id": "2:1347469140805829376",
-      "lastPropertyId": "5:75201656904859136",
+      "lastPropertyId": "7:6479909303570848256",
       "name": "NewsArticleDataModel",
       "properties": [
         {
@@ -33,6 +33,16 @@
           "id": "5:75201656904859136",
           "name": "publishDate",
           "type": 10
+        },
+        {
+          "id": "6:6569281597192037376",
+          "name": "noteId",
+          "type": 9
+        },
+        {
+          "id": "7:6479909303570848256",
+          "name": "embedding",
+          "type": 28
         }
       ],
       "relations": []

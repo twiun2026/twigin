@@ -1,13 +1,13 @@
 import Foundation
 
 // Parser that extracts metadata (title, publishDate, first URL, tags) from raw
-// Markdown source and returns a NewsArticleDataModel populated with parsed values.
+// Markdown source and returns a SourceModel populated with parsed values.
 // The parser is stateless and Sendable so it can be executed on background queues.
-struct ArticleMetadataParser: Sendable {
+struct SourceMetadataParser: Sendable {
 
     init() {}
 
-    func parse(_ markdown: String) -> ArticleDataModel {
+    func parse(_ markdown: String) -> SourceModel {
         // Work on a mutable copy to compute content after removing metadata ranges
         var occupied: [Range<String.Index>] = []
 
@@ -28,9 +28,9 @@ struct ArticleMetadataParser: Sendable {
         // Remove metadata ranges from the source string (from end to start)
         let content = makeContent(from: markdown, removing: occupied)
 
-        // Build NewsArticleDataModel
+        // Build SourceModel
         // Use default initializer then set properties. The parser doesn't know noteId or embedding.
-        let model = ArticleDataModel()
+        let model = SourceModel()
         model.title = titleResult.title
         model.publishDate = dateResult.date ?? Date()
         model.url = urlResult.urlString

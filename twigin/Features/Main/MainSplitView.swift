@@ -47,8 +47,8 @@ struct MainSplitView: View {
                 let appSupport = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                 let dir = appSupport.appendingPathComponent(Bundle.main.bundleIdentifier ?? "twigin").path
                 let store = try Store(directoryPath: dir)
-                let box = store.box(for: ArticleDataModel.self)
-                let q = try box.query { ArticleDataModel.noteId == noteId }.build()
+                let box = store.box(for: SourceModel.self)
+                let q = try box.query { SourceModel.noteId == noteId }.build()
                 let found = try q.find()
                 if !found.isEmpty {
                     for entity in found { try box.remove(entity.id) }
@@ -80,7 +80,7 @@ struct MainSplitView: View {
                     }
 
                     let raw = fullNote.documentJson ?? ""
-                    let parsed = ArticleMetadataParser().parse(raw)
+                    let parsed = SourceMetadataParser().parse(raw)
                     let title = parsed.title
                     let publishDate = parsed.publishDate
                     let urlString = parsed.url
@@ -167,9 +167,9 @@ struct MainSplitView: View {
                     let appSupport = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                     let dir = appSupport.appendingPathComponent(Bundle.main.bundleIdentifier ?? "twigin").path
                     let store = try Store(directoryPath: dir)
-                    let box = store.box(for: ArticleDataModel.self)
+                        let box = store.box(for: SourceModel.self)
 
-                    let q = try box.query { ArticleDataModel.noteId == noteId }.build()
+                    let q = try box.query { SourceModel.noteId == noteId }.build()
                     let found = try q.find()
                     if let existing = found.first {
                         existing.noteId = noteId
@@ -181,7 +181,7 @@ struct MainSplitView: View {
                         existing.embedding = avg
                         try box.put(existing)
                     } else {
-                        let entity = ArticleDataModel(noteId: noteId, title: title, content: content, url: urlString, tags: tags, publishDate: publishDate, embedding: avg)
+                            let entity = SourceModel(noteId: noteId, title: title, content: content, url: urlString, tags: tags, publishDate: publishDate, embedding: avg)
                         try box.put(entity)
                     }
 
@@ -203,14 +203,15 @@ struct MainSplitView: View {
             return
         }
         do {
-            let box = store.box(for: ArticleDataModel.self)
+            let box = store.box(for: SourceModel.self)
             print("===== ObjectBox 数据总览 =====")
             print("当前总记录数: [\(try box.count())]")
             for article in try box.all() {
                 print("ID: \(article.noteId)")
                 print("Title: \(article.title)")
                 print("Date: \(article.publishDate)")
-                print("URL: \(article.url ?? "N/A")")
+                let urlPreview = article.url ?? "N/A"
+                print("URL: \(urlPreview)")
                 print("Content 预览: \(article.content.prefix(50))...")
             }
             print("================================")

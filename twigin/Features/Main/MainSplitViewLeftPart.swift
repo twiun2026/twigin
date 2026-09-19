@@ -94,9 +94,9 @@ struct MainSplitViewLeftPart: View {
                                 do {
                                     if let promptModel = try await dao.prompt.get(id: promptNote.id) {
                                         let result = promptModel.content.replacingOccurrences(of: "{{articles}}", with: assembledArticles)
-                                        
+                                        print("result: \(result)")
                                         // ==========================================
-                                        // 优雅调用：直接丢给已注入的 aiService，完全不耦合具体 Provider
+                                        // 丢给已注入的 aiService，完全不耦合具体 Provider
                                         // ==========================================
                                         let aiRequest = AIRequest(command: .ask, prompt: result)
                                         let eventStream = await aiService.execute(request: aiRequest)

@@ -7,95 +7,109 @@ import Foundation
 
 // MARK: - Entity metadata
 
-extension NewsArticleDataModel: ObjectBox.Entity {}
+extension SourceModel: ObjectBox.Entity {}
 
-extension NewsArticleDataModel: ObjectBox.__EntityRelatable {
-    internal typealias EntityType = NewsArticleDataModel
+extension SourceModel: ObjectBox.__EntityRelatable {
+    internal typealias EntityType = SourceModel
 
-    internal var _id: EntityId<NewsArticleDataModel> {
-        return EntityId<NewsArticleDataModel>(self.id.value)
+    internal var _id: EntityId<SourceModel> {
+        return EntityId<SourceModel>(self.id.value)
     }
 }
 
-extension NewsArticleDataModel: ObjectBox.EntityInspectable {
-    internal typealias EntityBindingType = NewsArticleDataModelBinding
+extension SourceModel: ObjectBox.EntityInspectable {
+    internal typealias EntityBindingType = SourceModelBinding
 
     /// Generated metadata used by ObjectBox to persist the entity.
-    internal static let entityInfo = ObjectBox.EntityInfo(name: "NewsArticleDataModel", id: 2)
+    internal static let entityInfo = ObjectBox.EntityInfo(name: "SourceModel", id: 3)
 
     internal static let entityBinding = EntityBindingType()
 
     fileprivate static func buildEntity(modelBuilder: ObjectBox.ModelBuilder) throws {
-        let entityBuilder = try modelBuilder.entityBuilder(for: NewsArticleDataModel.self, id: 2, uid: 1347469140805829376)
-        try entityBuilder.addProperty(name: "id", type: PropertyType.long, flags: [.id], id: 1, uid: 2843959564389858560)
-        try entityBuilder.addProperty(name: "noteId", type: PropertyType.string, id: 6, uid: 6569281597192037376)
-        try entityBuilder.addProperty(name: "title", type: PropertyType.string, id: 2, uid: 8361989269940618496)
-        try entityBuilder.addProperty(name: "content", type: PropertyType.string, id: 3, uid: 8775985421856403200)
-        try entityBuilder.addProperty(name: "url", type: PropertyType.string, id: 4, uid: 2974810375726798592)
-        try entityBuilder.addProperty(name: "publishDate", type: PropertyType.date, id: 5, uid: 75201656904859136)
-        try entityBuilder.addProperty(name: "embedding", type: PropertyType.floatVector, id: 7, uid: 6479909303570848256)
+        let entityBuilder = try modelBuilder.entityBuilder(for: SourceModel.self, id: 3, uid: 1078083903610208512)
+        try entityBuilder.addProperty(name: "id", type: PropertyType.long, flags: [.id], id: 1, uid: 5737361370572520192)
+        try entityBuilder.addProperty(name: "noteId", type: PropertyType.string, id: 2, uid: 933128896500022272)
+        try entityBuilder.addProperty(name: "title", type: PropertyType.string, id: 3, uid: 5262672942162296576)
+        try entityBuilder.addProperty(name: "author", type: PropertyType.string, id: 4, uid: 82226364166844672)
+        try entityBuilder.addProperty(name: "content", type: PropertyType.string, id: 5, uid: 7741664547083118592)
+        try entityBuilder.addProperty(name: "url", type: PropertyType.string, id: 6, uid: 1214763920556112384)
+        try entityBuilder.addProperty(name: "tags", type: PropertyType.stringVector, id: 7, uid: 4611783314599611648)
+        try entityBuilder.addProperty(name: "publishDate", type: PropertyType.date, id: 8, uid: 708285367708198144)
+        try entityBuilder.addProperty(name: "embedding", type: PropertyType.floatVector, id: 9, uid: 8758923732168843520)
 
-        try entityBuilder.lastProperty(id: 7, uid: 6479909303570848256)
+        try entityBuilder.lastProperty(id: 9, uid: 8758923732168843520)
     }
 }
 
-extension NewsArticleDataModel {
+extension SourceModel {
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { NewsArticleDataModel.id == myId }
-    internal static var id: Property<NewsArticleDataModel, Id, Id> { return Property<NewsArticleDataModel, Id, Id>(propertyId: 1, isPrimaryKey: true) }
+    ///     box.query { ArticleDataModel.id == myId }
+    internal static var id: Property<SourceModel, Id, Id> { return Property<SourceModel, Id, Id>(propertyId: 1, isPrimaryKey: true) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { NewsArticleDataModel.noteId.startsWith("X") }
-    internal static var noteId: Property<NewsArticleDataModel, String, Void> { return Property<NewsArticleDataModel, String, Void>(propertyId: 6, isPrimaryKey: false) }
+    ///     box.query { ArticleDataModel.noteId.startsWith("X") }
+    internal static var noteId: Property<SourceModel, String, Void> { return Property<SourceModel, String, Void>(propertyId: 2, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { NewsArticleDataModel.title.startsWith("X") }
-    internal static var title: Property<NewsArticleDataModel, String, Void> { return Property<NewsArticleDataModel, String, Void>(propertyId: 2, isPrimaryKey: false) }
+    ///     box.query { ArticleDataModel.title.startsWith("X") }
+    internal static var title: Property<SourceModel, String, Void> { return Property<SourceModel, String, Void>(propertyId: 3, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { NewsArticleDataModel.content.startsWith("X") }
-    internal static var content: Property<NewsArticleDataModel, String, Void> { return Property<NewsArticleDataModel, String, Void>(propertyId: 3, isPrimaryKey: false) }
+    ///     box.query { ArticleDataModel.author.startsWith("X") }
+    internal static var author: Property<SourceModel, String?, Void> { return Property<SourceModel, String?, Void>(propertyId: 4, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { NewsArticleDataModel.url.startsWith("X") }
-    internal static var url: Property<NewsArticleDataModel, String?, Void> { return Property<NewsArticleDataModel, String?, Void>(propertyId: 4, isPrimaryKey: false) }
+    ///     box.query { ArticleDataModel.content.startsWith("X") }
+    internal static var content: Property<SourceModel, String, Void> { return Property<SourceModel, String, Void>(propertyId: 5, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { NewsArticleDataModel.publishDate > 1234 }
-    internal static var publishDate: Property<NewsArticleDataModel, Date, Void> { return Property<NewsArticleDataModel, Date, Void>(propertyId: 5, isPrimaryKey: false) }
+    ///     box.query { ArticleDataModel.url.startsWith("X") }
+    internal static var url: Property<SourceModel, String?, Void> { return Property<SourceModel, String?, Void>(propertyId: 6, isPrimaryKey: false) }
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
-    ///     box.query { NewsArticleDataModel.embedding.isGreaterThan(value) }
-    internal static var embedding: Property<NewsArticleDataModel, FloatArrayPropertyType, Void> { return Property<NewsArticleDataModel, FloatArrayPropertyType, Void>(propertyId: 7, isPrimaryKey: false) }
+    ///     box.query { ArticleDataModel.tags.containsElement(element: "<value>", caseSensitive: true) }
+    internal static var tags: Property<SourceModel, StringArrayPropertyType, Void> { return Property<SourceModel, StringArrayPropertyType, Void>(propertyId: 7, isPrimaryKey: false) }
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ArticleDataModel.publishDate > 1234 }
+    internal static var publishDate: Property<SourceModel, Date, Void> { return Property<SourceModel, Date, Void>(propertyId: 8, isPrimaryKey: false) }
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { ArticleDataModel.embedding.isGreaterThan(value) }
+    internal static var embedding: Property<SourceModel, FloatArrayPropertyType, Void> { return Property<SourceModel, FloatArrayPropertyType, Void>(propertyId: 9, isPrimaryKey: false) }
 
     fileprivate func __setId(identifier: ObjectBox.Id) {
         self.id = Id(identifier)
     }
 }
 
-extension ObjectBox.Property where E == NewsArticleDataModel {
+extension ObjectBox.Property where E == SourceModel {
     /// Generated entity property information.
     ///
     /// You may want to use this in queries to specify fetch conditions, for example:
     ///
     ///     box.query { .id == myId }
 
-    internal static var id: Property<NewsArticleDataModel, Id, Id> { return Property<NewsArticleDataModel, Id, Id>(propertyId: 1, isPrimaryKey: true) }
+    internal static var id: Property<SourceModel, Id, Id> { return Property<SourceModel, Id, Id>(propertyId: 1, isPrimaryKey: true) }
 
     /// Generated entity property information.
     ///
@@ -103,7 +117,7 @@ extension ObjectBox.Property where E == NewsArticleDataModel {
     ///
     ///     box.query { .noteId.startsWith("X") }
 
-    internal static var noteId: Property<NewsArticleDataModel, String, Void> { return Property<NewsArticleDataModel, String, Void>(propertyId: 6, isPrimaryKey: false) }
+    internal static var noteId: Property<SourceModel, String, Void> { return Property<SourceModel, String, Void>(propertyId: 2, isPrimaryKey: false) }
 
     /// Generated entity property information.
     ///
@@ -111,7 +125,15 @@ extension ObjectBox.Property where E == NewsArticleDataModel {
     ///
     ///     box.query { .title.startsWith("X") }
 
-    internal static var title: Property<NewsArticleDataModel, String, Void> { return Property<NewsArticleDataModel, String, Void>(propertyId: 2, isPrimaryKey: false) }
+    internal static var title: Property<SourceModel, String, Void> { return Property<SourceModel, String, Void>(propertyId: 3, isPrimaryKey: false) }
+
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .author.startsWith("X") }
+
+    internal static var author: Property<SourceModel, String?, Void> { return Property<SourceModel, String?, Void>(propertyId: 4, isPrimaryKey: false) }
 
     /// Generated entity property information.
     ///
@@ -119,7 +141,7 @@ extension ObjectBox.Property where E == NewsArticleDataModel {
     ///
     ///     box.query { .content.startsWith("X") }
 
-    internal static var content: Property<NewsArticleDataModel, String, Void> { return Property<NewsArticleDataModel, String, Void>(propertyId: 3, isPrimaryKey: false) }
+    internal static var content: Property<SourceModel, String, Void> { return Property<SourceModel, String, Void>(propertyId: 5, isPrimaryKey: false) }
 
     /// Generated entity property information.
     ///
@@ -127,7 +149,15 @@ extension ObjectBox.Property where E == NewsArticleDataModel {
     ///
     ///     box.query { .url.startsWith("X") }
 
-    internal static var url: Property<NewsArticleDataModel, String?, Void> { return Property<NewsArticleDataModel, String?, Void>(propertyId: 4, isPrimaryKey: false) }
+    internal static var url: Property<SourceModel, String?, Void> { return Property<SourceModel, String?, Void>(propertyId: 6, isPrimaryKey: false) }
+
+    /// Generated entity property information.
+    ///
+    /// You may want to use this in queries to specify fetch conditions, for example:
+    ///
+    ///     box.query { .tags.containsElement(element: "<value>", caseSensitive: true) }
+
+    internal static var tags: Property<SourceModel, StringArrayPropertyType, Void> { return Property<SourceModel, StringArrayPropertyType, Void>(propertyId: 7, isPrimaryKey: false) }
 
     /// Generated entity property information.
     ///
@@ -135,7 +165,7 @@ extension ObjectBox.Property where E == NewsArticleDataModel {
     ///
     ///     box.query { .publishDate > 1234 }
 
-    internal static var publishDate: Property<NewsArticleDataModel, Date, Void> { return Property<NewsArticleDataModel, Date, Void>(propertyId: 5, isPrimaryKey: false) }
+    internal static var publishDate: Property<SourceModel, Date, Void> { return Property<SourceModel, Date, Void>(propertyId: 8, isPrimaryKey: false) }
 
     /// Generated entity property information.
     ///
@@ -143,14 +173,14 @@ extension ObjectBox.Property where E == NewsArticleDataModel {
     ///
     ///     box.query { .embedding.isNotNil() }
 
-    internal static var embedding: Property<NewsArticleDataModel, FloatArrayPropertyType, Void> { return Property<NewsArticleDataModel, FloatArrayPropertyType, Void>(propertyId: 7, isPrimaryKey: false) }
+    internal static var embedding: Property<SourceModel, FloatArrayPropertyType, Void> { return Property<SourceModel, FloatArrayPropertyType, Void>(propertyId: 9, isPrimaryKey: false) }
 
 }
 
 
-/// Generated service type to handle persisting and reading entity data. Exposed through `NewsArticleDataModel.EntityBindingType`.
-internal final class NewsArticleDataModelBinding: ObjectBox.EntityBinding, Sendable {
-    internal typealias EntityType = NewsArticleDataModel
+/// Generated service type to handle persisting and reading entity data. Exposed through `ArticleDataModel.EntityBindingType`.
+internal final class SourceModelBinding: ObjectBox.EntityBinding, Sendable {
+    internal typealias EntityType = SourceModel
     internal typealias IdType = Id
 
     internal required init() {}
@@ -169,29 +199,35 @@ internal final class NewsArticleDataModelBinding: ObjectBox.EntityBinding, Senda
                                   propertyCollector: ObjectBox.FlatBufferBuilder, store: ObjectBox.Store) throws {
         let propertyOffset_noteId = propertyCollector.prepare(string: entity.noteId)
         let propertyOffset_title = propertyCollector.prepare(string: entity.title)
+        let propertyOffset_author = propertyCollector.prepare(string: entity.author)
         let propertyOffset_content = propertyCollector.prepare(string: entity.content)
         let propertyOffset_url = propertyCollector.prepare(string: entity.url)
+        let propertyOffset_tags = propertyCollector.prepare(values: entity.tags)
         let propertyOffset_embedding = propertyCollector.prepare(values: entity.embedding)
 
         propertyCollector.collect(id, at: 2 + 2 * 1)
-        propertyCollector.collect(entity.publishDate, at: 2 + 2 * 5)
-        propertyCollector.collect(dataOffset: propertyOffset_noteId, at: 2 + 2 * 6)
-        propertyCollector.collect(dataOffset: propertyOffset_title, at: 2 + 2 * 2)
-        propertyCollector.collect(dataOffset: propertyOffset_content, at: 2 + 2 * 3)
-        propertyCollector.collect(dataOffset: propertyOffset_url, at: 2 + 2 * 4)
-        propertyCollector.collect(dataOffset: propertyOffset_embedding, at: 2 + 2 * 7)
+        propertyCollector.collect(entity.publishDate, at: 2 + 2 * 8)
+        propertyCollector.collect(dataOffset: propertyOffset_noteId, at: 2 + 2 * 2)
+        propertyCollector.collect(dataOffset: propertyOffset_title, at: 2 + 2 * 3)
+        propertyCollector.collect(dataOffset: propertyOffset_author, at: 2 + 2 * 4)
+        propertyCollector.collect(dataOffset: propertyOffset_content, at: 2 + 2 * 5)
+        propertyCollector.collect(dataOffset: propertyOffset_url, at: 2 + 2 * 6)
+        propertyCollector.collect(dataOffset: propertyOffset_tags, at: 2 + 2 * 7)
+        propertyCollector.collect(dataOffset: propertyOffset_embedding, at: 2 + 2 * 9)
     }
 
     internal func createEntity(entityReader: ObjectBox.FlatBufferReader, store: ObjectBox.Store) -> EntityType {
-        let entity = NewsArticleDataModel()
+        let entity = SourceModel()
 
         entity.id = entityReader.read(at: 2 + 2 * 1)
-        entity.noteId = entityReader.read(at: 2 + 2 * 6)
-        entity.title = entityReader.read(at: 2 + 2 * 2)
-        entity.content = entityReader.read(at: 2 + 2 * 3)
-        entity.url = entityReader.read(at: 2 + 2 * 4)
-        entity.publishDate = entityReader.read(at: 2 + 2 * 5)
-        entity.embedding = entityReader.read(at: 2 + 2 * 7)
+        entity.noteId = entityReader.read(at: 2 + 2 * 2)
+        entity.title = entityReader.read(at: 2 + 2 * 3)
+        entity.author = entityReader.read(at: 2 + 2 * 4)
+        entity.content = entityReader.read(at: 2 + 2 * 5)
+        entity.url = entityReader.read(at: 2 + 2 * 6)
+        entity.tags = entityReader.read(at: 2 + 2 * 7)
+        entity.publishDate = entityReader.read(at: 2 + 2 * 8)
+        entity.embedding = entityReader.read(at: 2 + 2 * 9)
 
         return entity
     }
@@ -206,10 +242,10 @@ fileprivate func optConstruct<T: RawRepresentable>(_ type: T.Type, rawValue: T.R
 
 // MARK: - Store setup
 
-fileprivate func cModel() throws -> OpaquePointer {
+    fileprivate func cModel() throws -> OpaquePointer {
     let modelBuilder = try ObjectBox.ModelBuilder()
-    try NewsArticleDataModel.buildEntity(modelBuilder: modelBuilder)
-    modelBuilder.lastEntity(id: 2, uid: 1347469140805829376)
+    try SourceModel.buildEntity(modelBuilder: modelBuilder)
+    modelBuilder.lastEntity(id: 3, uid: 1078083903610208512)
     return modelBuilder.finish()
 }
 
@@ -217,7 +253,7 @@ extension ObjectBox.Store {
     /// A store with a fully configured model. Created by the code generator with your model's metadata in place.
     ///
     /// # In-memory database
-    /// To use a file-less in-memory database, instead of a directory path pass `memory:` 
+    /// To use a file-less in-memory database, instead of a directory path pass `memory:`
     /// together with an identifier string:
     /// ```swift
     /// let inMemoryStore = try Store(directoryPath: "memory:test-db")

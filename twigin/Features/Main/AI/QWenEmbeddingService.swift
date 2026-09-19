@@ -51,7 +51,7 @@ public final class QWenEmbeddingService: Sendable {
     public func fetchEmbeddings(for inputs: [String], apiKey: String? = nil) async throws -> [[Float]] {
         guard !inputs.isEmpty else { return [] }
         
-        let effectiveApiKey = await AIKeyRetriever.retrieve(fallback: apiKey ?? "")
+        let effectiveApiKey = await APIKeyRetriever.retrieve(fallback: apiKey ?? "")
         guard !effectiveApiKey.isEmpty else {
             throw AIProviderError.unavailable("Qwen API Key 缺失，无法执行向量化。")
         }

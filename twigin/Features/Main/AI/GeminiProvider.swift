@@ -43,7 +43,7 @@ public final class GeminiProvider: AIProvider {
             let task = Task {
                 do {
                     // 1. 从 Keychain 中获取 apiKey（带有 fallback 兜底）
-                    let apiKey = await AIKeyRetriever.retrieve(account: "GeminiAPIKey", fallback: config.apiKey)
+                    let apiKey = await APIKeyRetriever.retrieve(account: "GeminiAPIKey", fallback: config.apiKey)
                     guard !apiKey.isEmpty else {
                         throw AIProviderError.unavailable("Gemini API Key 缺失。请在设置中保存您的 API Key。")
                     }

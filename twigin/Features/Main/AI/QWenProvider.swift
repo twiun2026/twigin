@@ -44,7 +44,7 @@ public final class QWenProvider: AIProvider {
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    let apiKey = await AIKeyRetriever.retrieve(fallback: config.apiKey)
+                    let apiKey = await APIKeyRetriever.retrieve(fallback: config.apiKey)
                     guard !apiKey.isEmpty else {
                         throw AIProviderError.unavailable("Qwen API Key 缺失。请在设置中保存您的 API Key。")
                     }

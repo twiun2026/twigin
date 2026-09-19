@@ -66,8 +66,8 @@ class NoteListViewModel: ObservableObject {
                 guard let dir = objectBoxDir(),
                       let store = try? Store(directoryPath: dir) else { return }
                 defer { store.close() }
-                let box = store.box(for: ArticleDataModel.self)
-                let entity = ArticleDataModel(noteId: newId, title: "New Article", content: "", tags: [], embedding: [])
+                let box = store.box(for: SourceModel.self)
+                let entity = SourceModel(noteId: newId, title: "New Article", content: "", tags: [], embedding: [])
                 try? box.put(entity)
                 loadNotes(for: folderId)
             }
@@ -105,8 +105,8 @@ class NoteListViewModel: ObservableObject {
                 guard let dir = objectBoxDir(),
                       let store = try? Store(directoryPath: dir) else { return }
                 defer { store.close() }
-                let box = store.box(for: ArticleDataModel.self)
-                let q = try? box.query { ArticleDataModel.noteId == id }.build()
+                let box = store.box(for: SourceModel.self)
+                let q = try? box.query { SourceModel.noteId == id }.build()
                 let found = (try? q?.find()) ?? []
                 for e in found { try? box.remove(e.id) }
                 loadNotes(for: currentFolderId)
@@ -162,8 +162,8 @@ class NoteListViewModel: ObservableObject {
                 guard let dir = objectBoxDir(),
                       let store = try? Store(directoryPath: dir) else { return }
                 defer { store.close() }
-                let box = store.box(for: ArticleDataModel.self)
-                let q = try? box.query { ArticleDataModel.noteId == id }.build()
+                let box = store.box(for: SourceModel.self)
+                let q = try? box.query { SourceModel.noteId == id }.build()
                 if let existing = try? q?.find().first {
                     existing.title = cleanTitle
                     existing.content = content
@@ -206,8 +206,8 @@ class NoteListViewModel: ObservableObject {
             guard let dir = objectBoxDir(),
                   let store = try? Store(directoryPath: dir) else { return nil }
             defer { store.close() }
-            let box = store.box(for: ArticleDataModel.self)
-            let q = try? box.query { ArticleDataModel.noteId == id }.build()
+            let box = store.box(for: SourceModel.self)
+            let q = try? box.query { SourceModel.noteId == id }.build()
             if let article = try? q?.find().first {
                 return NoteModel(from: article)
             }
@@ -238,7 +238,7 @@ class NoteListViewModel: ObservableObject {
         guard let dir = objectBoxDir(),
               let store = try? Store(directoryPath: dir) else { return [] }
         defer { store.close() }
-        let box = store.box(for: ArticleDataModel.self)
+        let box = store.box(for: SourceModel.self)
         let articles = (try? box.all()) ?? []
         return articles.map { NoteModel(from: $0) }
     }
@@ -247,7 +247,7 @@ class NoteListViewModel: ObservableObject {
 // MARK: - NoteModel conversions
 
 private extension NoteModel {
-    init(from article: ArticleDataModel) {
+    init(from article: SourceModel) {
         self.init(
             noteId: article.noteId,
             folderId: "__source_library__",
