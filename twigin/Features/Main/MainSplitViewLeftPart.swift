@@ -283,8 +283,8 @@ struct FolderRowView: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: iconName(for: folder))
-                .font(.system(size: 16))
-                .frame(width: 20, height: 20, alignment: .center)
+                .font(.system(size: 15, weight: .regular)) // 使用标准尺寸，如 14 或 15
+                .frame(width: 20, alignment: .center)      // 仅限制宽度以对齐文本，不限制高度
                 .foregroundColor(iconColor(for: folder))
             if isEditing {
                 TextField("Folder Name", text: $editedTitle)
